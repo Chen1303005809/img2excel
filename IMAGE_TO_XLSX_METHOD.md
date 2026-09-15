@@ -54,7 +54,7 @@ python image2xlsx.py C:\path\input.png C:\path\output.xlsx --json-output C:\path
 
 ## 集成边界
 
-- `image_to_rows.py` 是识别引擎，输出 `sections[].cells`、`merged_cells`、`ocr_boxes` 和 `metrics`。
+- `image_to_rows.py` 是识别引擎，输出 `sections[].cells`、`merged_cells`、`ocr_boxes`、彩色说明框和 `metrics`。
 - `rows.json` 是稳定接口。Web API、桌面程序、批处理或消息队列都只需调用一次 `extract(image_path)`。
 - `build_xlsx_portable.py` 只负责把 JSON 写成 Excel，不参与 OCR。以后替换 Excel 库时不需要改识别逻辑。
 
@@ -62,7 +62,7 @@ python image2xlsx.py C:\path\input.png C:\path\output.xlsx --json-output C:\path
 
 1. 有网格线：按当前图片自动发现水平线、垂直线和局部缺失边界，不使用固定列数。
 2. 长图：按高度自动重叠切片 OCR，避免把整张长图缩得过小；重叠框会去重。
-3. 彩色标题：只作为分区标题线索，不是识别前提。黑白、蓝色、紫色或无标题带都可以进入主链。
+3. 彩色标题：检测到完整彩色分区时，优先用彩色带切分表格并保留带内多行说明；没有足够彩带时再回退到线段检测。黑白、蓝色、紫色或无标题带都可以进入主链。
 4. 合并单元格：局部边界缺失时用相邻单元格连通关系恢复，遇到不规则噪声会放弃危险合并。
 5. 无边框/断线：使用 OCR 文字框的行聚类和列起点聚类生成近似网格。
 6. 低置信度或疑似 `%G`、问号等单元格：只对这些单元格做裁边二次识别，控制耗时。
@@ -71,7 +71,7 @@ python image2xlsx.py C:\path\input.png C:\path\output.xlsx --json-output C:\path
 
 输出 Excel 默认包含：
 
-- `识别结果`：按发现的表格块纵向排列，列数可变。
+- `识别结果`：按发现的表格块纵向排列，列数可变；彩色说明框和普通页脚追加在表格之后。
 - `识别质量`：表格块数量、OCR 框、低分框、自动后备分支和二次修正记录。
 - `OCR坐标`：原图坐标、所属行列和模型分数，可回查原图。
 

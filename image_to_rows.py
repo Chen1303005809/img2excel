@@ -386,7 +386,10 @@ def group_cell_text(items: list[dict[str, Any]]) -> str:
         placed = False
         for line in lines:
             center = sum(part["cy"] for part in line) / len(line)
-            if abs(item["cy"] - center) <= max(4.0, height * 0.65):
+            # A small horizontal OCR drift must not reorder stacked text in a
+            # narrow cell.  Cap the same-line tolerance so vertically stacked
+            # header fragments stay on separate lines.
+            if abs(item["cy"] - center) <= max(4.0, min(12.0, height * 0.65)):
                 line.append(item)
                 placed = True
                 break
@@ -458,7 +461,24 @@ class UnionFind:
             self.parent[right_root] = left_root
 
 
-def axis_edges(mask: np.ndarray, horizontal: bool) -> list[int]:
+def _longest_true_run(values: np.ndarray) -> int:
+    longest = 0
+    current = 0
+    for value in values:
+        current = current + 1 if value else 0
+        longest = max(longest, current)
+    return longest
+
+
+def _vertical_rule_is_real(gray: np.ndarray, x: int) -> bool:
+    """Reject vertical OCR strokes that only look persistent after morphology."""
+    left = max(0, x - 1)
+    right = min(gray.shape[1], x + 2)
+    dark = (gray[:, left:right] < 240).any(axis=1)
+    return _longest_true_run(dark) >= max(16, int(round(gray.shape[0] * 0.10)))
+
+
+def axis_edges(mask: np.ndarray, horizontal: bool, gray: np.ndarray | None = None) -> list[int]:
     if horizontal:
         records = horizontal_line_records(mask, min_span_ratio=0.045)
         values = [record["y"] for record in records]
@@ -477,6 +497,10 @@ def axis_edges(mask: np.ndarray, horizontal: bool) -> list[int]:
         threshold = max(10, int(round(mask.shape[0] * ratio)))
         candidate = contiguous_runs(strength >= threshold)
         candidate_values = [(start + end) / 2 for start, end in candidate]
+        if gray is not None:
+            candidate_values = [
+                value for value in candidate_values if _vertical_rule_is_real(gray, int(round(value)))
+            ]
         if ratio == ratios[0] or len(candidate_values) >= 3:
             values = candidate_values
             if len(candidate_values) >= 3:
@@ -487,7 +511,77 @@ def axis_edges(mask: np.ndarray, horizontal: bool) -> list[int]:
 
 def detect_grid(gray: np.ndarray) -> tuple[list[int], list[int]]:
     horizontal, vertical = line_masks(gray)
-    return axis_edges(vertical, horizontal=False), axis_edges(horizontal, horizontal=True)
+    return axis_edges(vertical, horizontal=False, gray=gray), axis_edges(horizontal, horizontal=True)
+
+
+def _is_document_title_band(band: tuple[int, int], image_height: int) -> bool:
+    return band[0] <= max(3, int(round(image_height * 0.01)))
+
+
+def colored_band_regions(
+    gray: np.ndarray,
+    bands: list[tuple[int, int]],
+    band_labels: list[str],
+) -> tuple[list[dict[str, Any]], list[int]]:
+    """Build table regions from colored section boundaries when available."""
+    if len(bands) < 2:
+        return [], []
+
+    first_section = 1 if _is_document_title_band(bands[0], gray.shape[0]) else 0
+    regions: list[dict[str, Any]] = []
+    note_indices: list[int] = []
+    for index in range(first_section, len(bands)):
+        band = bands[index]
+        y0 = band[1] + 1
+        y1 = bands[index + 1][0] - 1 if index + 1 < len(bands) else gray.shape[0] - 1
+        if y1 <= y0:
+            continue
+
+        local_gray = gray[y0 : y1 + 1]
+        x_edges, y_edges = detect_grid(local_gray)
+        grid_ok = len(x_edges) >= 3 and len(y_edges) >= 3
+        # A final colored band followed only by a plain footer is a note, not
+        # another table.  Other intervals remain regions so borderless tables
+        # can still use the OCR layout fallback.
+        if not grid_ok and index == len(bands) - 1:
+            note_indices.append(index)
+            continue
+
+        regions.append(
+            {
+                "x0": 0,
+                "x1": gray.shape[1] - 1,
+                "y0": y0,
+                "y1": y1,
+                "line_records": [],
+                "band": band,
+                "band_index": index,
+                "band_label": band_labels[index] if index < len(band_labels) else "",
+            }
+        )
+    return regions, note_indices
+
+
+def expand_first_region_after_title(
+    regions: list[dict[str, Any]],
+    title_band: tuple[int, int] | None,
+    image_width: int,
+) -> list[dict[str, Any]]:
+    """Include a table header that line detection separated from its body."""
+    if not title_band:
+        return regions
+    full_width = max(40, int(round(image_width * 0.90)))
+    candidates = [
+        region
+        for region in regions
+        if region["y0"] > title_band[1]
+        and region["x1"] - region["x0"] + 1 >= full_width
+    ]
+    if not candidates:
+        return regions
+    first = min(candidates, key=lambda region: region["y0"])
+    first["y0"] = title_band[1] + 1
+    return regions
 
 
 def build_merged_cells(
@@ -673,13 +767,36 @@ def detect_text_regions(items: list[dict[str, Any]], width: int, height: int) ->
     return regions
 
 
-def band_label(engine: RapidOCR, image: np.ndarray, band: tuple[int, int]) -> str:
-    start, end = band
-    items = recognize(engine, image[start : end + 1], scale=2.0)
+def _meaningful_band_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop punctuation-only OCR noise from colored bands."""
+    return [
+        item
+        for item in items
+        if re.search(r"[\u4e00-\u9fffA-Za-z0-9]", str(item.get("text", "")))
+    ]
+
+
+def _band_label_from_items(items: list[dict[str, Any]]) -> str:
+    items = _meaningful_band_items(items)
     if not items:
         return ""
     best = sorted(items, key=lambda item: (len(item["text"]), item["score"]), reverse=True)[0]
     return best["text"]
+
+
+def _band_text_from_items(items: list[dict[str, Any]]) -> str:
+    return group_cell_text(_meaningful_band_items(items)).strip()
+
+
+def band_label(engine: RapidOCR, image: np.ndarray, band: tuple[int, int]) -> str:
+    start, end = band
+    return _band_label_from_items(recognize(engine, image[start : end + 1], scale=2.0))
+
+
+def band_text(engine: RapidOCR, image: np.ndarray, band: tuple[int, int]) -> str:
+    """Read all lines in a colored band, retaining multi-line notes."""
+    start, end = band
+    return _band_text_from_items(recognize(engine, image[start : end + 1], scale=2.0))
 
 
 def title_from_items(items: list[dict[str, Any]]) -> str:
@@ -741,9 +858,22 @@ def extract(input_path: Path) -> dict[str, Any]:
     engine = RapidOCR()
 
     bands = detect_colored_bands(image)
-    line_regions, _, _ = detect_line_regions(gray)
-    line_regions = coalesce_line_regions(line_regions, bands)
-    regions = split_line_regions_by_bands(line_regions, bands, height)
+    band_labels: list[str] = []
+    band_texts: list[str] = []
+    for start, end in bands:
+        items = recognize(engine, image[start : end + 1], scale=2.0)
+        band_labels.append(_band_label_from_items(items))
+        band_texts.append(_band_text_from_items(items))
+
+    colored_regions, note_indices = colored_band_regions(gray, bands, band_labels)
+    if colored_regions:
+        regions = colored_regions
+    else:
+        line_regions, _, _ = detect_line_regions(gray)
+        line_regions = coalesce_line_regions(line_regions, bands)
+        regions = split_line_regions_by_bands(line_regions, bands, height)
+        title_band = bands[0] if bands and _is_document_title_band(bands[0], height) else None
+        regions = expand_first_region_after_title(regions, title_band, width)
     full_ocr: list[dict[str, Any]] = []
     if not regions:
         full_ocr = recognize_tiled(engine, image)
@@ -759,10 +889,14 @@ def extract(input_path: Path) -> dict[str, Any]:
                 "fallback_items": full_ocr,
             }]
 
-    if height > 700:
+    if bands and _is_document_title_band(bands[0], height) and band_texts[0]:
+        title = band_texts[0]
+    elif height > 700:
         title_items = recognize_tiled(engine, image[: min(height, 300)])
+        title = title_from_items(title_items)
     else:
         title_items = recognize(engine, image[: min(height, max(120, height // 3))], scale=1.5)
+        title = title_from_items(title_items)
 
     sections: list[dict[str, Any]] = []
     all_boxes: list[dict[str, Any]] = []
@@ -814,7 +948,9 @@ def extract(input_path: Path) -> dict[str, Any]:
             corrections.append({"section": index, "from": value, "to": reread, "row": merged["r0"] + 1, "column": merged["c0"] + 1})
 
         scores = [float(item["score"]) for item in local_items]
-        label = band_label(engine, image, region["band"]) if region.get("band") else ""
+        label = str(region.get("band_label", ""))
+        if not label and region.get("band"):
+            label = band_label(engine, image, region["band"])
         if not label:
             label = f"表格 {index:02d}"
         sections.append(
@@ -833,14 +969,31 @@ def extract(input_path: Path) -> dict[str, Any]:
             }
         )
 
+    footer_notes: list[dict[str, Any]] = []
+    if note_indices and max(note_indices) == len(bands) - 1:
+        footer_start = bands[max(note_indices)][1] + 1
+        footer_items = dedupe_ocr_items(recognize_tiled(engine, image[footer_start:]))
+        footer_text = group_cell_text(footer_items).strip()
+        if footer_text:
+            footer_notes.append({"text": footer_text})
+
     if not full_ocr and not sections:
         full_ocr = recognize_tiled(engine, image)
     return {
         "version": 2,
         "source": {"filename": input_path.name, "width": width, "height": height},
-        "title": title_from_items(title_items),
-        "bands": [{"y0": start, "y1": end} for start, end in bands],
+        "title": title,
+        "bands": [
+            {"y0": start, "y1": end, "text": band_texts[index] if index < len(band_texts) else ""}
+            for index, (start, end) in enumerate(bands)
+        ],
         "sections": sections,
+        "colored_notes": [
+            {"band": [bands[index][0], bands[index][1]], "text": band_texts[index]}
+            for index in note_indices
+            if index < len(band_texts) and band_texts[index]
+        ],
+        "footer_notes": footer_notes,
         "ocr_boxes": all_boxes,
         "corrections": corrections,
         "metrics": {

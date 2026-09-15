@@ -1,3 +1,4 @@
 pics/
 
 __pycache__
+:memory:.ses

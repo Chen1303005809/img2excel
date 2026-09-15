@@ -141,6 +141,29 @@ def write_workbook(data: dict[str, Any], output_path: Path) -> None:
             result.cell(row0, col0).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
         current_row += len(rows)
 
+    for note in data.get("colored_notes", []):
+        text = str(note.get("text", "")).strip()
+        if not text:
+            continue
+        result.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=max_columns)
+        cell = result.cell(current_row, 1, text)
+        cell.fill = PatternFill("solid", fgColor=PURPLE)
+        cell.font = Font(name="Arial", size=9, bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        result.row_dimensions[current_row].height = min(72, max(24, 20 * (text.count("\n") + 1)))
+        current_row += 1
+
+    for note in data.get("footer_notes", []):
+        text = str(note.get("text", "")).strip()
+        if not text:
+            continue
+        result.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=max_columns)
+        cell = result.cell(current_row, 1, text)
+        cell.font = Font(name="Arial", size=9, color="222222")
+        cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        result.row_dimensions[current_row].height = min(54, max(22, 20 * (text.count("\n") + 1)))
+        current_row += 1
+
     # Quality view
     quality.merge_cells("A2:D2")
     quality["A2"] = "图片转 Excel 实验质量"
@@ -162,7 +185,7 @@ def write_workbook(data: dict[str, Any], output_path: Path) -> None:
         ["二次修正", len(data.get("corrections", [])), "对疑似低置信度单元格做裁边复识别"],
         ["识别链路", "OpenCV + RapidOCR + ONNX Runtime CPU", "几何与文字识别解耦"],
         ["表格策略", "；".join(f"{key}: {value}" for key, value in strategy_counts.items()), "规则表优先，无边框时使用 OCR 排版后备"],
-        ["彩色标题带", metrics.get("colored_band_count", 0), "仅用于识别分区标题，不作为结构前提"],
+        ["彩色标题带", metrics.get("colored_band_count", 0), "优先定位分区、彩色说明框和页首表头；不足时回退到线段检测"],
         ["自动后备分支", "已使用" if metrics.get("fallback_used") else "未使用", "后备分支用于处理无边框或断线表格"],
     ]
     for row in metric_rows:
