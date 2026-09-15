@@ -420,8 +420,19 @@ def locate_cell(cx: float, cy: float, x_edges: list[int], y_edges: list[int]) ->
     return max(0, min(column, len(x_edges) - 2)), max(0, min(row, len(y_edges) - 2))
 
 
-def horizontal_present(gray: np.ndarray, y: int, x0: int, x1: int) -> bool:
+def horizontal_present(
+    gray: np.ndarray, y: int, x0: int, x1: int, horizontal_mask: np.ndarray | None = None
+) -> bool:
     """Decide whether a horizontal rule actually crosses one column."""
+    if horizontal_mask is not None:
+        x0 = min(max(0, x0 + 2), horizontal_mask.shape[1])
+        x1 = min(max(x0, x1 - 2), horizontal_mask.shape[1])
+        region = horizontal_mask[max(0, y - 2) : min(horizontal_mask.shape[0], y + 3), x0:x1]
+        if region.size:
+            # Morphological opening keeps long rules and removes individual
+            # glyph strokes.  A real rule occupies most of one scanline.
+            return float((region > 0).mean(axis=1).max()) >= 0.55
+        return False
     y0 = max(0, y - 1)
     y1 = min(gray.shape[0], y + 2)
     x0 = min(max(0, x0 + 2), gray.shape[1])
@@ -432,8 +443,17 @@ def horizontal_present(gray: np.ndarray, y: int, x0: int, x1: int) -> bool:
     return coverage >= 0.22
 
 
-def vertical_present(gray: np.ndarray, x: int, y0: int, y1: int) -> bool:
+def vertical_present(
+    gray: np.ndarray, x: int, y0: int, y1: int, vertical_mask: np.ndarray | None = None
+) -> bool:
     """Decide whether a vertical rule actually crosses one row."""
+    if vertical_mask is not None:
+        y0 = min(max(0, y0 + 2), vertical_mask.shape[0])
+        y1 = min(max(y0, y1 - 2), vertical_mask.shape[0])
+        region = vertical_mask[y0:y1, max(0, x - 2) : min(vertical_mask.shape[1], x + 3)]
+        if region.size:
+            return float((region > 0).mean(axis=0).max()) >= 0.55
+        return False
     x0 = max(0, x - 1)
     x1 = min(gray.shape[1], x + 2)
     y0 = min(max(0, y0 + 2), gray.shape[0])
@@ -584,30 +604,102 @@ def expand_first_region_after_title(
     return regions
 
 
+def document_title_regions(
+    gray: np.ndarray, title_band: tuple[int, int]
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Recover table blocks below a single document-level colored title.
+
+    Long tables can contain tall merged rows with only a few local rules.  The
+    line-region detector then returns fragments.  A new persistent vertical
+    rule is a stronger signal that the column layout changed, so use it to
+    split the document into real table blocks and keep the footer outside the
+    last grid.
+    """
+    height, width = gray.shape
+    start = title_band[1] + 1
+    if start >= height:
+        return [], None
+
+    horizontal, vertical = line_masks(gray)
+    base_end = min(height, start + max(480, min(700, height - start)))
+    base_edges, _ = detect_grid(gray[start:base_end])
+    tolerance = max(10, int(round(width * 0.01)))
+    minimum_span = max(80, int(round(height * 0.08)))
+    extra_rules = [
+        record
+        for record in vertical_line_records(vertical, min_span_ratio=0.08)
+        if record["y1"] - record["y0"] + 1 >= minimum_span
+        and record["y0"] > start
+        and min(abs(record["x"] - edge) for edge in base_edges) > tolerance
+    ]
+    if not extra_rules:
+        return [], None
+
+    layout_start = int(round(min(record["y0"] for record in extra_rules)))
+    full_width_rules = [
+        int(round(record["y"]))
+        for record in horizontal_line_records(horizontal, min_span_ratio=0.04)
+        if record["x0"] <= width * 0.05 and record["x1"] >= width * 0.95
+    ]
+    table_end = next(
+        (line for line in sorted(full_width_rules) if line > layout_start + max(80, int(round(height * 0.03)))),
+        height - 1,
+    )
+    if table_end <= layout_start:
+        return [], None
+
+    regions = [
+        {
+            "x0": 0,
+            "x1": width - 1,
+            "y0": start,
+            "y1": layout_start,
+            "line_records": [],
+            "band": None,
+        },
+        {
+            "x0": 0,
+            "x1": width - 1,
+            "y0": layout_start + 1,
+            "y1": table_end,
+            "line_records": [],
+            "band": None,
+        },
+    ]
+    footer_start = table_end + 1 if table_end < height - 1 else None
+    return regions, footer_start
+
+
 def build_merged_cells(
     gray: np.ndarray,
     x_edges: list[int],
     y_edges: list[int],
     items: list[dict[str, Any]],
+    horizontal_mask: np.ndarray | None = None,
+    vertical_mask: np.ndarray | None = None,
 ) -> tuple[list[list[Any]], list[dict[str, Any]]]:
     """Recover rectangular row/column spans from partial rules around cells."""
     row_count = len(y_edges) - 1
     column_count = len(x_edges) - 1
     if row_count <= 0 or column_count <= 0:
         return [], []
+    if horizontal_mask is None or vertical_mask is None:
+        detected_horizontal, detected_vertical = line_masks(gray)
+        horizontal_mask = horizontal_mask if horizontal_mask is not None else detected_horizontal
+        vertical_mask = vertical_mask if vertical_mask is not None else detected_vertical
     uf = UnionFind(row_count * column_count)
     node = lambda row, column: row * column_count + column
 
     for row in range(row_count - 1):
         y = y_edges[row + 1]
         for column in range(column_count):
-            if not horizontal_present(gray, y, x_edges[column], x_edges[column + 1]):
+            if not horizontal_present(gray, y, x_edges[column], x_edges[column + 1], horizontal_mask):
                 uf.union(node(row, column), node(row + 1, column))
 
     for column in range(column_count - 1):
         x = x_edges[column + 1]
         for row in range(row_count):
-            if not vertical_present(gray, x, y_edges[row], y_edges[row + 1]):
+            if not vertical_present(gray, x, y_edges[row], y_edges[row + 1], vertical_mask):
                 uf.union(node(row, column), node(row, column + 1))
 
     group_members: dict[int, list[tuple[int, int]]] = {}
@@ -652,6 +744,7 @@ def build_merged_cells(
                 "c0": group["c0"],
                 "c1": group["c1"],
                 "value": value,
+                "ocr_item_count": len(group["items"]),
                 "ocr_min_score": round(min(scores), 4) if scores else None,
                 "ocr_max_score": round(max(scores), 4) if scores else None,
             }
@@ -830,7 +923,12 @@ def reread_cell(engine: RapidOCR, crop: np.ndarray, cell: dict[str, Any]) -> str
             candidates.append((text, float(np.mean([item["score"] for item in items]))))
     if not candidates:
         return None
-    return max(candidates, key=lambda item: (item[1], len(item[0])))[0]
+    best_score = max(score for _, score in candidates)
+    # Thresholding can raise the average score while dropping punctuation or
+    # a whole narrow line.  Among nearly equivalent reads, keep the one with
+    # more recognized characters so a crop does not silently lose content.
+    eligible = [item for item in candidates if item[1] >= best_score - 0.01]
+    return max(eligible, key=lambda item: (len(re.sub(r"\s+", "", item[0])), item[1]))[0]
 
 
 def needs_reread(value: str, score: float | None) -> bool:
@@ -838,6 +936,13 @@ def needs_reread(value: str, score: float | None) -> bool:
         return False
     suspicious = any(token in value for token in ("%G", "G%", "？", "?", "口"))
     return suspicious or (score is not None and score < 0.78)
+
+
+def needs_merge_reread(merged: dict[str, Any]) -> bool:
+    """Re-read sparse non-trivial merges whose narrow text is easy to miss."""
+    if merged["r0"] == merged["r1"] and merged["c0"] == merged["c1"]:
+        return False
+    return int(merged.get("ocr_item_count", 0)) <= 1
 
 
 def offset_item(item: dict[str, Any], x_offset: int, y_offset: int) -> dict[str, Any]:
@@ -866,14 +971,19 @@ def extract(input_path: Path) -> dict[str, Any]:
         band_texts.append(_band_text_from_items(items))
 
     colored_regions, note_indices = colored_band_regions(gray, bands, band_labels)
+    title_band = bands[0] if bands and _is_document_title_band(bands[0], height) else None
+    footer_start: int | None = None
     if colored_regions:
         regions = colored_regions
     else:
-        line_regions, _, _ = detect_line_regions(gray)
-        line_regions = coalesce_line_regions(line_regions, bands)
-        regions = split_line_regions_by_bands(line_regions, bands, height)
-        title_band = bands[0] if bands and _is_document_title_band(bands[0], height) else None
-        regions = expand_first_region_after_title(regions, title_band, width)
+        regions = []
+        if title_band and len(bands) == 1:
+            regions, footer_start = document_title_regions(gray, title_band)
+        if not regions:
+            line_regions, _, _ = detect_line_regions(gray)
+            line_regions = coalesce_line_regions(line_regions, bands)
+            regions = split_line_regions_by_bands(line_regions, bands, height)
+            regions = expand_first_region_after_title(regions, title_band, width)
     full_ocr: list[dict[str, Any]] = []
     if not regions:
         full_ocr = recognize_tiled(engine, image)
@@ -911,9 +1021,12 @@ def extract(input_path: Path) -> dict[str, Any]:
         local_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         local_items = dedupe_ocr_items(recognize_tiled(engine, crop))
         x_edges, y_edges = detect_grid(local_gray)
+        horizontal_mask, vertical_mask = line_masks(local_gray)
         grid_ok = len(x_edges) >= 3 and len(y_edges) >= 3
         if grid_ok:
-            cells, merged_cells = build_merged_cells(local_gray, x_edges, y_edges, local_items)
+            cells, merged_cells = build_merged_cells(
+                local_gray, x_edges, y_edges, local_items, horizontal_mask, vertical_mask
+            )
             strategy = "opencv_grid"
         else:
             cells, merged_cells, x_edges, y_edges = infer_text_grid(local_items, crop.shape[1], crop.shape[0])
@@ -932,7 +1045,9 @@ def extract(input_path: Path) -> dict[str, Any]:
         for merged in merged_cells:
             value = str(merged.get("value", ""))
             score = merged.get("ocr_min_score")
-            if not needs_reread(value, score):
+            standard_reread = needs_reread(value, score)
+            merge_reread = needs_merge_reread(merged)
+            if not standard_reread and not merge_reread:
                 continue
             cell = {
                 "x0": x_edges[merged["c0"]],
@@ -943,16 +1058,23 @@ def extract(input_path: Path) -> dict[str, Any]:
             reread = reread_cell(engine, crop, cell)
             if not reread or reread == value:
                 continue
+            if merge_reread and not standard_reread:
+                old_length = len(re.sub(r"\s+", "", value))
+                new_length = len(re.sub(r"\s+", "", reread))
+                if new_length <= old_length:
+                    continue
             merged["value"] = typed_value(reread)
             cells[merged["r0"]][merged["c0"]] = merged["value"]
             corrections.append({"section": index, "from": value, "to": reread, "row": merged["r0"] + 1, "column": merged["c0"] + 1})
 
+        # Empty groups are useful while probing for missed OCR, but they are
+        # not meaningful merges in the exported table.  Leaving them in the
+        # contract makes a blank structural corner look like lost content.
+        merged_cells = [merged for merged in merged_cells if str(merged.get("value", "")).strip()]
         scores = [float(item["score"]) for item in local_items]
         label = str(region.get("band_label", ""))
         if not label and region.get("band"):
             label = band_label(engine, image, region["band"])
-        if not label:
-            label = f"表格 {index:02d}"
         sections.append(
             {
                 "id": f"T{index:02d}",
@@ -970,8 +1092,9 @@ def extract(input_path: Path) -> dict[str, Any]:
         )
 
     footer_notes: list[dict[str, Any]] = []
-    if note_indices and max(note_indices) == len(bands) - 1:
+    if footer_start is None and note_indices and max(note_indices) == len(bands) - 1:
         footer_start = bands[max(note_indices)][1] + 1
+    if footer_start is not None:
         footer_items = dedupe_ocr_items(recognize_tiled(engine, image[footer_start:]))
         footer_text = group_cell_text(footer_items).strip()
         if footer_text:

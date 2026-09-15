@@ -111,14 +111,16 @@ def write_workbook(data: dict[str, Any], output_path: Path) -> None:
     current_row = 5
     for section in sections:
         section_columns = section_column_count(section)
-        section_last = get_column_letter(section_columns)
-        result.merge_cells(f"A{current_row}:{section_last}{current_row}")
-        result.cell(current_row, 1, section.get("label") or f"表格 {current_row:02d}")
-        result.cell(current_row, 1).fill = PatternFill("solid", fgColor=PURPLE)
-        result.cell(current_row, 1).font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
-        result.cell(current_row, 1).alignment = Alignment(horizontal="center", vertical="center")
-        result.row_dimensions[current_row].height = 21
-        current_row += 1
+        label = str(section.get("label", "")).strip()
+        if label:
+            section_last = get_column_letter(section_columns)
+            result.merge_cells(f"A{current_row}:{section_last}{current_row}")
+            result.cell(current_row, 1, label)
+            result.cell(current_row, 1).fill = PatternFill("solid", fgColor=PURPLE)
+            result.cell(current_row, 1).font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+            result.cell(current_row, 1).alignment = Alignment(horizontal="center", vertical="center")
+            result.row_dimensions[current_row].height = 21
+            current_row += 1
 
         rows = section.get("cells", [])
         for row_offset, row_values in enumerate(rows):
@@ -131,6 +133,8 @@ def write_workbook(data: dict[str, Any], output_path: Path) -> None:
             set_row_height(result, row_index, padded, section_columns)
 
         for merged in section.get("merged_cells", []):
+            if not str(merged.get("value", "")).strip():
+                continue
             if merged["r0"] == merged["r1"] and merged["c0"] == merged["c1"]:
                 continue
             row0 = current_row + merged["r0"]
