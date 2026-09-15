@@ -30,6 +30,17 @@ python -m pip install -r requirements-image2xlsx.txt
 python image2xlsx.py /path/to/input.png /path/to/output.xlsx --json-output /path/to/rows.json
 ```
 
+也可以把输入改为目录，程序会扫描目录下的图片，并在输出目录中按原文件名生成
+`.xlsx`（例如 `sales.png` 会生成 `sales.xlsx`）：
+
+```bash
+python image2xlsx.py /path/to/images /path/to/output
+```
+
+默认只扫描当前目录；加上 `--recursive` 会同时扫描子目录。批量模式下可用
+`--json-output /path/to/json` 将每张图片的中间 JSON 以同名文件写入 JSON 目录。
+同一批次中如果不同目录存在同名图片，程序会提前报错，避免结果互相覆盖。
+
 Windows PowerShell 对应：
 
 ```powershell
