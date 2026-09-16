@@ -17,7 +17,11 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("data")
     database_url: str | None = None
-    frontend_origin: str = "http://127.0.0.1:5173"
+    backend_host: str = "127.0.0.1"
+    backend_port: int = 8000
+    frontend_host: str = "127.0.0.1"
+    frontend_port: int = 5173
+    frontend_origin: str | None = None
     worker_poll_interval: float = 1.0
     worker_concurrency: int = 1
     crawl_concurrency: int | None = None
@@ -39,6 +43,10 @@ class Settings(BaseSettings):
         return f"sqlite:///{self.resolved_data_dir / 'app.db'}"
 
     @property
+    def resolved_frontend_origin(self) -> str:
+        return self.frontend_origin or f"http://{self.frontend_host}:{self.frontend_port}"
+
+    @property
     def effective_crawl_concurrency(self) -> int:
         return max(1, self.crawl_concurrency or self.worker_concurrency)
 
@@ -48,4 +56,3 @@ def get_settings() -> Settings:
     settings = Settings()
     settings.resolved_data_dir.mkdir(parents=True, exist_ok=True)
     return settings
-

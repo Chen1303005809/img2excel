@@ -21,11 +21,9 @@ PP-StructureV3 和 img2table 不在默认主链中。它们可以作为独立 A/
 
 ## 一条命令运行
 
-需要 Python 3.12 虚拟环境：
+需要 Python 3.12 或系统默认 Python 解释器：
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
 python -m pip install -r requirements-image2xlsx.txt
 python image2xlsx.py /path/to/input.png /path/to/output.xlsx --json-output /path/to/rows.json
 ```
@@ -44,8 +42,6 @@ python image2xlsx.py /path/to/images /path/to/output
 Windows PowerShell 对应：
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements-image2xlsx.txt
 python image2xlsx.py C:\path\input.png C:\path\output.xlsx --json-output C:\path\rows.json
 ```

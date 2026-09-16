@@ -4,15 +4,16 @@
 
 ## 运行环境
 
-- Python 3.12，使用仓库内的 `.venv`
+- Python 3.12，使用系统默认解释器 `python`
 - Node.js 20+
 - Crawl4AI 所需的 Chromium 浏览器
 
 首次安装依赖：
 
 ```bash
-./.venv/bin/python -m pip install -r requirements-app.txt
-CRAWL4_AI_BASE_DIRECTORY="$PWD/data/.crawl4ai" ./.venv/bin/crawl4ai-setup   # 如果本机还没有 Crawl4AI 浏览器
+cp .env.example .env  # 首次运行时复制，并按需修改端口
+python -m pip install -r requirements-app.txt
+CRAWL4_AI_BASE_DIRECTORY="$PWD/data/.crawl4ai" crawl4ai-setup   # 如果本机还没有 Crawl4AI 浏览器
 cd frontend && npm install
 ```
 
@@ -29,18 +30,26 @@ cd frontend && npm install
 也可以在仓库根目录分别启动三个进程：
 
 ```bash
-./.venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
-./.venv/bin/python -m backend.worker
+set -a
+source .env
+set +a
+python -m uvicorn backend.app.main:app --host "$IMAGE_TABLE_BACKEND_HOST" --port "$IMAGE_TABLE_BACKEND_PORT" --reload
+python -m backend.worker
 cd frontend && npm run dev
 ```
 
-浏览器访问 <http://127.0.0.1:5173>。后端默认只绑定本机；应用第一次启动会通过 Alembic 建库并预置 804、805、970 三个 YAFCO 来源。数据库和运行产物默认写入 `data/`，可通过 `.env` 或 `IMAGE_TABLE_*` 环境变量调整。
+浏览器访问 `http://${IMAGE_TABLE_FRONTEND_HOST}:${IMAGE_TABLE_FRONTEND_PORT}`。后端默认只绑定本机；应用第一次启动会通过 Alembic 建库并预置 804、805、970 三个 YAFCO 来源。数据库和运行产物默认写入 `data/`，可通过 `.env` 或 `IMAGE_TABLE_*` 环境变量调整。
 
 关键配置：
 
 | 配置 | 默认值 | 作用 |
 | --- | --- | --- |
 | `IMAGE_TABLE_DATA_DIR` | `data` | SQLite 与运行产物目录 |
+| `IMAGE_TABLE_BACKEND_HOST` | `127.0.0.1` | 后端监听地址 |
+| `IMAGE_TABLE_BACKEND_PORT` | `8000` | 后端监听端口 |
+| `IMAGE_TABLE_FRONTEND_HOST` | `127.0.0.1` | 前端监听地址 |
+| `IMAGE_TABLE_FRONTEND_PORT` | `5173` | 前端监听端口 |
+| `IMAGE_TABLE_FRONTEND_ORIGIN` | 自动按前端地址生成 | 后端 CORS 来源；跨域部署时可显式设置 |
 | `IMAGE_TABLE_WORKER_CONCURRENCY` | `1` | Worker 同时处理的运行数 |
 | `IMAGE_TABLE_CRAWL_CONCURRENCY` | Worker 并发数 | 抓取信号量 |
 | `IMAGE_TABLE_OCR_CONCURRENCY` | `1` | OCR 信号量，默认串行 |
@@ -90,7 +99,7 @@ data/runs/<run_id>/
 ## 测试
 
 ```bash
-./.venv/bin/python -m pytest -q
+python -m pytest -q
 cd frontend && npm run build
 ```
 
