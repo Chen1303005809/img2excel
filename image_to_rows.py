@@ -954,13 +954,14 @@ def offset_item(item: dict[str, Any], x_offset: int, y_offset: int) -> dict[str,
     return shifted
 
 
-def extract(input_path: Path) -> dict[str, Any]:
+def extract(input_path: Path, engine: RapidOCR | None = None) -> dict[str, Any]:
+    """Extract one image, optionally reusing an OCR engine owned by a Worker."""
     image = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
     if image is None:
         raise SystemExit(f"cannot read image: {input_path}")
     height, width = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    engine = RapidOCR()
+    engine = engine or RapidOCR()
 
     bands = detect_colored_bands(image)
     band_labels: list[str] = []
