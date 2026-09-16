@@ -60,3 +60,9 @@ export function parseCellInput(value: string, previous: Scalar): Scalar {
   if (typeof previous === "number" && /^-?\d+(\.\d+)?$/.test(value)) return Number(value);
   return value;
 }
+
+export function formatConfidence(score: number | null): string {
+  if (score === null || !Number.isFinite(score)) return "—";
+  const normalized = Math.max(0, Math.min(1, score));
+  return `${(normalized * 100).toFixed(1)}%`;
+}

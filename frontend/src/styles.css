@@ -53,5 +53,23 @@ select { border: 1px solid #d8dee7; border-radius: 7px; padding: 9px 10px; color
 .image-info { margin-top: 15px; padding-top: 12px; border-top: 1px solid #edf0f4; color: #718096; font-size: 11px; }
 .unsaved-badge { display: inline-block; margin-left: 6px; padding: 3px 7px; border-radius: 999px; color: #98671c; background: #fff2cc; font-size: 10px; font-weight: 700; vertical-align: middle; }
 .data-table td.low-confidence { box-shadow: inset 3px 0 #e3a52a; }
-.cell-score { display: block; padding: 2px 7px 0; color: #a36d17; font-size: 9px; }
+.cell-score { display: block; padding: 2px 7px 0; color: #7b8796; font-size: 9px; }
+.cell-score.low { color: #a36d17; font-weight: 700; }
 @media (max-width: 720px) { .topbar { padding: 24px 18px 18px; flex-direction: column; align-items: flex-start; gap: 16px; }.content-grid { padding: 14px 12px 40px; }.panel { padding: 16px; }.panel-heading { flex-direction: column; }.filter-row { width: 100%; display: grid; grid-template-columns: 1fr 1fr auto; }.button-row { width: 100%; flex-wrap: wrap; }.button-row button { flex: 1; }.artifact-list { grid-template-columns: 1fr; } }
+
+.data-workspace { display: grid; grid-template-columns: minmax(210px, .8fr) minmax(0, 1.2fr); gap: 16px; align-items: start; }
+.data-workspace .document-tables { min-width: 0; }
+.original-image-viewer { min-width: 0; overflow: hidden; border: 1px solid #dfe5ec; border-radius: 9px; background: #fbfcfe; }
+.original-image-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 10px 12px; border-bottom: 1px solid #e5e9ee; }
+.original-image-heading h3 { margin: 0; font-size: 13px; }
+.original-image-heading a { color: #1d5fa9; font-size: 10px; text-decoration: none; white-space: nowrap; }
+.original-image-heading a:hover { text-decoration: underline; }
+.original-image-scroll { height: 620px; overflow: auto; padding: 12px; background: #f1f4f7; overscroll-behavior: contain; }
+.original-image-scroll img { display: block; width: auto; max-width: none; height: auto; min-width: 0; background: #fff; box-shadow: 0 2px 8px rgba(33, 45, 61, .16); }
+.original-image-meta { display: block; overflow: hidden; padding: 7px 12px; color: #7b8796; text-overflow: ellipsis; white-space: nowrap; }
+.image-empty { display: grid; place-items: center; height: 180px; color: #7b8796; font-size: 11px; }
+
+@media (max-width: 720px) {
+  .data-workspace { grid-template-columns: 1fr; }
+  .original-image-scroll { height: 360px; }
+}

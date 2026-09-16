@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { api } from "./api";
-import { buildDiffMap, buildQualityMap, cellDisplay, cloneDocument, mergeMaps, parseCellInput } from "./tableModel";
+import { buildDiffMap, buildQualityMap, cellDisplay, cloneDocument, formatConfidence, mergeMaps, parseCellInput } from "./tableModel";
 import type { CompareResult, Document, Run, Scalar, Source, TableSection } from "./types";
 
 type View = "sources" | "runs";
@@ -252,7 +252,7 @@ function RunDetail({ run, document, compare, stats, dirty, onSelectImage, onChan
     {run.status === "awaiting_image_selection" && <CandidatePicker candidates={run.candidates} onSelect={onSelectImage} />}
     {run.status === "succeeded" && document && <>
       <ComparisonPanel compare={compare} />
-      <section className="panel data-panel"><div className="panel-heading"><div><p className="eyebrow">DATA PANEL</p><h2>识别数据 {dirty && <span className="unsaved-badge">有未保存修改</span>}</h2><p className="muted">可修改单元格值。保存修订后再导出，历史原稿保持不变。</p></div><div className="button-row"><button className={dirty ? "primary" : "quiet"} onClick={onSave}>保存修订</button><button className="primary" onClick={onExport}>导出 JSON / XLSX</button></div></div><DocumentTables document={document} compare={compare} onChangeCell={onChangeCell} /></section>
+      <section className="panel data-panel"><div className="panel-heading"><div><p className="eyebrow">DATA PANEL</p><h2>识别数据 {dirty && <span className="unsaved-badge">有未保存修改</span>}</h2><p className="muted">可修改单元格值。保存修订后再导出，历史原稿保持不变。</p></div><div className="button-row"><button className={dirty ? "primary" : "quiet"} onClick={onSave}>保存修订</button><button className="primary" onClick={onExport}>导出 JSON / XLSX</button></div></div><div className="data-workspace"><OriginalImageViewer run={run} /><DocumentTables document={document} compare={compare} onChangeCell={onChangeCell} /></div></section>
       <Artifacts run={run} />
     </>}
   </>;
@@ -265,6 +265,11 @@ function SelectedImageInfo({ run }: { run: Run }) {
   if (!candidate) return null;
   const dimensions = candidate.width && candidate.height ? `${candidate.width} × ${candidate.height}` : "尺寸未知";
   return <div className="image-info">原图：{dimensions}{candidate.mime_type && <span> · {candidate.mime_type}</span>}{candidate.sha256 && <span> · SHA-256 {candidate.sha256.slice(0, 16)}…</span>}</div>;
+}
+
+function OriginalImageViewer({ run }: { run: Run }) {
+  const artifact = run.artifacts.find((item) => item.kind === "source_image");
+  return <section className="original-image-viewer"><div className="original-image-heading"><div><p className="eyebrow">SOURCE IMAGE</p><h3>原图核对</h3></div>{artifact && <a href={artifact.download_url} target="_blank" rel="noreferrer">打开原图</a>}</div>{artifact ? <div className="original-image-scroll"><img src={artifact.download_url} alt="本次运行下载的原始表格图片" /></div> : <div className="image-empty">暂无原图产物</div>}{artifact && <small className="original-image-meta">{artifact.filename}</small>}</section>;
 }
 
 function CandidatePicker({ candidates, onSelect }: { candidates: Run["candidates"]; onSelect: (id: string) => void }) { return <section className="panel candidate-panel"><p className="eyebrow">IMAGE CANDIDATES</p><h2>请选择正文图片</h2><p className="muted">页面发现多张图片。选择正确的表格图片后才会开始识别。</p><div className="candidate-list">{candidates.map((candidate) => <button className="candidate" key={candidate.id} onClick={() => onSelect(candidate.id)}><span className="candidate-number">{candidate.ordinal + 1}</span><span><strong>{candidate.width && candidate.height ? `${candidate.width} × ${candidate.height}` : "尺寸未知"}</strong><small>{candidate.alt || candidate.resolved_url}</small></span></button>)}</div></section>; }
@@ -288,8 +293,9 @@ function TableSectionView({ section, diffMap, qualityMap, onChangeCell }: { sect
     const diff = diffMap.get(`${section.id}:${rowIndex}:${columnIndex}`);
     const score = qualityMap.get(`${section.id}:${rowIndex}:${columnIndex}`) ?? merge?.score ?? null;
     const lowConfidence = score !== null && score < 0.75;
-    const title = [diff ? `相对上次：${diff}` : "", lowConfidence ? `OCR 置信度：${score.toFixed(3)}` : ""].filter(Boolean).join("；") || undefined;
-    return <td key={columnIndex} rowSpan={merge?.rowSpan} colSpan={merge?.colSpan} className={`${diff ? `diff-${diff}` : ""} ${merge ? "merged-cell" : ""} ${lowConfidence ? "low-confidence" : ""}`} title={title}>{lowConfidence && <small className="cell-score">低置信度 {score.toFixed(2)}</small>}<textarea aria-label={`${section.label || section.id} 第${rowIndex + 1}行第${columnIndex + 1}列`} value={cellDisplay(value)} onChange={(event) => onChangeCell(section.id, rowIndex, columnIndex, event.target.value)} /></td>;
+    const confidence = formatConfidence(score);
+    const title = [diff ? `相对上次：${diff}` : "", `OCR 置信度：${confidence}`].filter(Boolean).join("；") || undefined;
+    return <td key={columnIndex} rowSpan={merge?.rowSpan} colSpan={merge?.colSpan} className={`${diff ? `diff-${diff}` : ""} ${merge ? "merged-cell" : ""} ${lowConfidence ? "low-confidence" : ""}`} title={title}><small className={`cell-score ${lowConfidence ? "low" : ""}`}>置信度 {confidence}</small><textarea aria-label={`${section.label || section.id} 第${rowIndex + 1}行第${columnIndex + 1}列`} value={cellDisplay(value)} onChange={(event) => onChangeCell(section.id, rowIndex, columnIndex, event.target.value)} /></td>;
   })}</tr>)}</tbody></table></div></div>;
 }
 

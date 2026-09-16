@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDiffMap, buildQualityMap, mergeMaps, parseCellInput } from "./tableModel";
+import { buildDiffMap, buildQualityMap, formatConfidence, mergeMaps, parseCellInput } from "./tableModel";
 import type { Document, TableSection } from "./types";
 
 const section: TableSection = {
@@ -58,5 +58,11 @@ describe("table view model", () => {
     expect(parseCellInput("42", 0)).toBe(42);
     expect(parseCellInput("42", "编号")).toBe("42");
     expect(parseCellInput("", 42)).toBe("");
+  });
+
+  it("formats every cell confidence as a percentage", () => {
+    expect(formatConfidence(0.987)).toBe("98.7%");
+    expect(formatConfidence(0.61)).toBe("61.0%");
+    expect(formatConfidence(null)).toBe("—");
   });
 });
