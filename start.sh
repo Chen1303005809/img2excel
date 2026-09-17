@@ -44,6 +44,7 @@ export IMAGE_TABLE_BACKEND_PORT="${IMAGE_TABLE_BACKEND_PORT:-8000}"
 export IMAGE_TABLE_FRONTEND_HOST="${IMAGE_TABLE_FRONTEND_HOST:-127.0.0.1}"
 export IMAGE_TABLE_FRONTEND_PORT="${IMAGE_TABLE_FRONTEND_PORT:-5173}"
 export PYTHONUNBUFFERED="1"
+UVICORN_LOG_LEVEL="${IMAGE_TABLE_LOG_LEVEL:-info}"
 
 cd "${PROJECT_ROOT}"
 
@@ -73,6 +74,38 @@ if [[ ! -x "${PROJECT_ROOT}/frontend/node_modules/.bin/vite" ]]; then
   exit 1
 fi
 
+check_port_available() {
+  local service_name="$1"
+  local host="$2"
+  local port="$3"
+
+  if "${PYTHON_BIN}" - "${host}" "${port}" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+family = socket.AF_INET6 if ":" in host else socket.AF_INET
+bind_host = host or ("::" if family == socket.AF_INET6 else "0.0.0.0")
+
+with socket.socket(family, socket.SOCK_STREAM) as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((bind_host, port))
+PY
+  then
+    return 0
+  fi
+
+  echo "${service_name}端口不可用：${host}:${port}" >&2
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"${port}" -sTCP:LISTEN >&2 || true
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltnp "sport = :${port}" >&2 || true
+  fi
+  echo "请停止占用该端口的旧进程，或修改 .env 中对应的端口。" >&2
+  exit 1
+}
+
 echo "检查 Python/Crawl4AI/Chromium 运行环境。"
 if ! "${PYTHON_BIN}" - <<'PY'
 import asyncio
@@ -98,6 +131,8 @@ required_modules = (
     "crawl4ai",
     "playwright",
     "rapidocr",
+    "backend.app.main",
+    "backend.worker",
 )
 missing = []
 for module_name in required_modules:
@@ -139,6 +174,36 @@ fi
 if [[ "${1:-}" == "--check" ]]; then
   echo "全部运行环境检查通过。"
   exit 0
+fi
+
+check_port_available "后端" "${IMAGE_TABLE_BACKEND_HOST}" "${IMAGE_TABLE_BACKEND_PORT}"
+check_port_available "前端" "${IMAGE_TABLE_FRONTEND_HOST}" "${IMAGE_TABLE_FRONTEND_PORT}"
+
+echo "初始化数据库。"
+if ! "${PYTHON_BIN}" - <<'PY'
+from sqlalchemy.orm import sessionmaker
+
+from backend.app.config import get_settings
+from backend.app.database import build_engine, run_migrations
+from backend.app.models import Base
+from backend.app.seed import seed_sources
+
+settings = get_settings()
+run_migrations(settings)
+engine = build_engine(settings)
+try:
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    with session_factory() as session:
+        seed_sources(session)
+finally:
+    engine.dispose()
+
+print("数据库初始化完成。")
+PY
+then
+  echo "数据库初始化失败，请检查上面的完整 traceback。" >&2
+  exit 1
 fi
 
 child_pids=()
@@ -219,7 +284,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "后端地址：http://${IMAGE_TABLE_BACKEND_HOST}:${IMAGE_TABLE_BACKEND_PORT}"
-start_service "后端" "${PYTHON_BIN}" -m uvicorn backend.app.main:app --host "${IMAGE_TABLE_BACKEND_HOST}" --port "${IMAGE_TABLE_BACKEND_PORT}"
+start_service "后端" "${PYTHON_BIN}" -m uvicorn backend.app.main:app --host "${IMAGE_TABLE_BACKEND_HOST}" --port "${IMAGE_TABLE_BACKEND_PORT}" --log-level "${UVICORN_LOG_LEVEL}"
 wait_for_backend
 start_service "Worker" "${PYTHON_BIN}" -m backend.worker
 echo "前端地址：http://${IMAGE_TABLE_FRONTEND_HOST}:${IMAGE_TABLE_FRONTEND_PORT}"
