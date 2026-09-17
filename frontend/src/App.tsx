@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api, type ExportFormat } from "./api";
+import { EXCEPTION_TRADE_HEADERS, extractExceptionTradeTable, isExceptionMonitoringDocument, type ExceptionTradeRow } from "./exceptionTradeModel";
 import { buildDiffMap, buildQualityMap, cellDisplay, cellRangeContains, cloneDocument, findMergeAt, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, rangesOverlap, scoreLevel, unmergeCellAt, type CellRange } from "./tableModel";
 import type { CompareResult, Document, Run, Scalar, Source, TableSection } from "./types";
 
@@ -356,7 +357,26 @@ function ComparisonPanel({ compare }: { compare: CompareResult | null }) { if (!
 function DocumentTables({ document, compare, selectedRange, onChangeCell, onSelectCell, onMerge, onUnmerge }: { document: Document; compare: CompareResult | null; selectedRange: CellRange | null; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void }) {
   const diffMap = buildDiffMap(compare);
   const qualityMap = buildQualityMap(document);
-  return <div className="document-tables"><ConfidenceGuide />{document.sections.map((section) => <TableSectionView key={section.id} section={section} diffMap={diffMap} qualityMap={qualityMap} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} />)}{document.footer_notes?.length > 0 && <div className="notes-block"><strong>页脚说明</strong>{document.footer_notes.map((note, index) => <p key={index}>{String(note.text ?? "")}</p>)}</div>}</div>;
+  const isException = isExceptionMonitoringDocument(document);
+  const exceptionTable = isException ? extractExceptionTradeTable(document) : null;
+  const rawTables = <><ConfidenceGuide />{document.sections.map((section) => <TableSectionView key={section.id} section={section} diffMap={diffMap} qualityMap={qualityMap} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} />)}</>;
+  return <div className="document-tables">{exceptionTable ? <><ExceptionTradeTable table={exceptionTable} />{<details className="raw-document-details"><summary>查看/修订原始识别表格</summary><div className="raw-document-tables">{rawTables}</div></details>}</> : rawTables}{document.footer_notes?.length > 0 && <div className="notes-block"><strong>页脚说明</strong>{document.footer_notes.map((note, index) => <p key={index}>{String(note.text ?? "")}</p>)}</div>}</div>;
+}
+
+function formatQuantity(value: number): string {
+  return value.toLocaleString("zh-CN");
+}
+
+function ExceptionTradeTable({ table }: { table: { rows: ExceptionTradeRow[]; unmappedLimitCells: string[] } }) {
+  return <section className="exception-table-panel">
+    <div className="exception-table-heading">
+      <div><p className="eyebrow">EXCEPTION MONITORING</p><h3>异常交易开仓总量</h3><p className="muted">从识别结果中的“交易限额”单元格提取品种/合约，并通过本地静态映射补全交易所与代码。</p></div>
+      <span className="exception-row-count">{table.rows.length} 条限制</span>
+    </div>
+    <div className="exception-table-note">原图只提供单日最大开仓量，未提供独立预警线；预警值暂按最大开仓量的 80% 计算。中金所同时存在“单一合约/品种合计”及期权口径，详情请展开原始表格核对。</div>
+    {table.rows.length ? <div className="table-scroll"><table className="exception-table"><thead><tr>{EXCEPTION_TRADE_HEADERS.map((header) => <th scope="col" key={header}>{header}</th>)}</tr></thead><tbody>{table.rows.map((row) => <tr key={row.id} title={row.sourceText}><td>{row.exchange}</td><td><span className="instrument-name">{row.instrumentName}</span>{row.scope === "contract" && <small className="instrument-scope">指定合约</small>}</td><td><code>{row.instrumentCode}</code></td><td className="quantity-cell">{formatQuantity(row.openTotal)}</td><td className="quantity-cell warning-cell">{formatQuantity(row.openTotalWarning)}</td><td><span className={`instrument-kind ${row.instrumentType === "期权" ? "option" : "future"}`}>{row.instrumentType}</span></td></tr>)}</tbody></table></div> : <div className="exception-empty">未从交易限额单元格中识别到可映射品种，请展开原始 OCR 表格核对。</div>}
+    {table.unmappedLimitCells.length > 0 && <div className="exception-unmapped"><strong>有 {table.unmappedLimitCells.length} 个限额单元格未完成静态映射</strong><span>已保留在原始识别表格中，请补充映射后再使用。</span></div>}
+  </section>;
 }
 
 function ConfidenceGuide() {
