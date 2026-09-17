@@ -43,6 +43,7 @@ export IMAGE_TABLE_BACKEND_HOST="${IMAGE_TABLE_BACKEND_HOST:-127.0.0.1}"
 export IMAGE_TABLE_BACKEND_PORT="${IMAGE_TABLE_BACKEND_PORT:-8000}"
 export IMAGE_TABLE_FRONTEND_HOST="${IMAGE_TABLE_FRONTEND_HOST:-127.0.0.1}"
 export IMAGE_TABLE_FRONTEND_PORT="${IMAGE_TABLE_FRONTEND_PORT:-5173}"
+export PYTHONUNBUFFERED="1"
 
 cd "${PROJECT_ROOT}"
 
@@ -166,12 +167,60 @@ start_service() {
   child_pids+=("$!")
 }
 
+wait_for_backend() {
+  local backend_pid="${child_pids[0]}"
+  local health_host="${IMAGE_TABLE_BACKEND_HOST}"
+  local health_url
+  local attempt
+  local exit_code
+
+  case "${health_host}" in
+    ""|0.0.0.0|::)
+      health_host="127.0.0.1"
+      ;;
+  esac
+  health_url="http://${health_host}:${IMAGE_TABLE_BACKEND_PORT}/api/health"
+
+  echo "等待后端就绪：${health_url}"
+  for ((attempt = 1; attempt <= 60; attempt++)); do
+    if ! kill -0 "${backend_pid}" 2>/dev/null; then
+      if wait "${backend_pid}"; then
+        exit_code=0
+      else
+        exit_code=$?
+      fi
+      echo "服务 后端 (PID ${backend_pid}) 在就绪前退出，退出码：${exit_code}。" >&2
+      exit "${exit_code:-1}"
+    fi
+
+    if "${PYTHON_BIN}" - "${health_url}" <<'PY'
+import sys
+from urllib.request import urlopen
+
+try:
+    with urlopen(sys.argv[1], timeout=1) as response:
+        raise SystemExit(0 if response.status == 200 else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+    then
+      echo "后端已就绪。"
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "后端在 60 秒内未就绪，正在停止其他服务。" >&2
+  exit 1
+}
+
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "后端地址：http://${IMAGE_TABLE_BACKEND_HOST}:${IMAGE_TABLE_BACKEND_PORT}"
 start_service "后端" "${PYTHON_BIN}" -m uvicorn backend.app.main:app --host "${IMAGE_TABLE_BACKEND_HOST}" --port "${IMAGE_TABLE_BACKEND_PORT}"
+wait_for_backend
 start_service "Worker" "${PYTHON_BIN}" -m backend.worker
 echo "前端地址：http://${IMAGE_TABLE_FRONTEND_HOST}:${IMAGE_TABLE_FRONTEND_PORT}"
 (
