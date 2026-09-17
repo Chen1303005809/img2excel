@@ -79,7 +79,9 @@ select { border: 1px solid #d8dee7; border-radius: 7px; padding: 9px 10px; color
 .exception-table th { padding: 10px 9px; border-bottom: 1px solid #dbe5f0; color: #6f7e90; background: #f5f9fe; text-align: left; font-size: 10px; font-weight: 800; }
 .exception-table th:nth-child(1) { width: 17%; }.exception-table th:nth-child(2) { width: 22%; }.exception-table th:nth-child(3) { width: 25%; }.exception-table th:nth-child(4) { width: 12%; }.exception-table th:nth-child(5) { width: 12%; }.exception-table th:nth-child(6) { width: 12%; }
 .exception-table td { padding: 9px; border-bottom: 1px solid #edf1f5; vertical-align: top; line-height: 1.45; }
+.exception-table td.exception-exchange-cell { vertical-align: middle; color: #174f88; background: #edf5ff; font-weight: 800; white-space: nowrap; }
 .exception-table tbody tr:last-child td { border-bottom: 0; }
+.exception-table tr.exception-group-start td { border-top: 4px solid #c5d8ee; }
 .exception-table tbody tr:hover { background: #f7fbff; }
 .exception-table code { color: #315b8c; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; white-space: normal; overflow-wrap: anywhere; }
 .instrument-name { display: block; font-weight: 700; }

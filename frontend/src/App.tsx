@@ -368,13 +368,20 @@ function formatQuantity(value: number): string {
 }
 
 function ExceptionTradeTable({ table }: { table: { rows: ExceptionTradeRow[]; unmappedLimitCells: string[] } }) {
+  const exchangeGroups = table.rows.reduce<Array<{ exchange: string; rows: ExceptionTradeRow[] }>>((groups, row) => {
+    const group = groups.find((item) => item.exchange === row.exchange);
+    if (group) group.rows.push(row);
+    else groups.push({ exchange: row.exchange, rows: [row] });
+    return groups;
+  }, []);
+
   return <section className="exception-table-panel">
     <div className="exception-table-heading">
       <div><p className="eyebrow">EXCEPTION MONITORING</p><h3>异常交易开仓总量</h3><p className="muted">从识别结果中的“交易限额”单元格提取品种/合约，并通过本地静态映射补全交易所与代码。</p></div>
       <span className="exception-row-count">{table.rows.length} 条限制</span>
     </div>
     <div className="exception-table-note">原图只提供单日最大开仓量，未提供独立预警线；预警值暂按最大开仓量的 80% 计算。中金所同时存在“单一合约/品种合计”及期权口径，详情请展开原始表格核对。</div>
-    {table.rows.length ? <div className="table-scroll"><table className="exception-table"><thead><tr>{EXCEPTION_TRADE_HEADERS.map((header) => <th scope="col" key={header}>{header}</th>)}</tr></thead><tbody>{table.rows.map((row) => <tr key={row.id} title={row.sourceText}><td>{row.exchange}</td><td><span className="instrument-name">{row.instrumentName}</span>{row.scope === "contract" && <small className="instrument-scope">指定合约</small>}</td><td><code>{row.instrumentCode}</code></td><td className="quantity-cell">{formatQuantity(row.openTotal)}</td><td className="quantity-cell warning-cell">{formatQuantity(row.openTotalWarning)}</td><td><span className={`instrument-kind ${row.instrumentType === "期权" ? "option" : "future"}`}>{row.instrumentType}</span></td></tr>)}</tbody></table></div> : <div className="exception-empty">未从交易限额单元格中识别到可映射品种，请展开原始 OCR 表格核对。</div>}
+    {table.rows.length ? <div className="table-scroll"><table className="exception-table"><thead><tr>{EXCEPTION_TRADE_HEADERS.map((header) => <th scope="col" key={header}>{header}</th>)}</tr></thead>{exchangeGroups.map((group, groupIndex) => <tbody key={group.exchange} className={groupIndex > 0 ? "exception-exchange-group" : undefined}>{group.rows.map((row, rowIndex) => <tr className={rowIndex === 0 && groupIndex > 0 ? "exception-group-start" : undefined} key={row.id} title={row.sourceText}>{rowIndex === 0 && <td className="exception-exchange-cell" rowSpan={group.rows.length}>{group.exchange}</td>}<td><span className="instrument-name">{row.instrumentName}</span>{row.scope === "contract" && <small className="instrument-scope">指定合约</small>}</td><td><code>{row.instrumentCode}</code></td><td className="quantity-cell">{formatQuantity(row.openTotal)}</td><td className="quantity-cell warning-cell">{formatQuantity(row.openTotalWarning)}</td><td><span className={`instrument-kind ${row.instrumentType === "期权" ? "option" : "future"}`}>{row.instrumentType}</span></td></tr>)}</tbody>)}</table></div> : <div className="exception-empty">未从交易限额单元格中识别到可映射品种，请展开原始识别表格核对。</div>}
     {table.unmappedLimitCells.length > 0 && <div className="exception-unmapped"><strong>有 {table.unmappedLimitCells.length} 个限额单元格未完成静态映射</strong><span>已保留在原始识别表格中，请补充映射后再使用。</span></div>}
   </section>;
 }
