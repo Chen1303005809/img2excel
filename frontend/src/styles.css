@@ -73,6 +73,10 @@ select { border: 1px solid #d8dee7; border-radius: 7px; padding: 9px 10px; color
   .data-workspace { grid-template-columns: 1fr; }
 }
 
+/* Keep cells readable without letting exceptionally long OCR results take over the page. */
+.data-table td { height: 82px; }
+.data-table textarea { min-height: 62px; max-height: 320px; overflow-y: hidden; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 .section-band { flex-wrap: wrap; }
 .section-band > div:first-child { min-width: 0; }
 .section-band > div:first-child span { display: block; margin-top: 3px; }

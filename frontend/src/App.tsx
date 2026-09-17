@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api, type ExportFormat } from "./api";
 import { buildDiffMap, buildQualityMap, cellDisplay, cellRangeContains, cloneDocument, findMergeAt, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, rangesOverlap, scoreLevel, unmergeCellAt, type CellRange } from "./tableModel";
 import type { CompareResult, Document, Run, Scalar, Source, TableSection } from "./types";
@@ -13,6 +13,25 @@ const activeStatuses = new Set(["queued", "crawling", "downloading", "extracting
 function formatTime(value: string | null | undefined): string {
   if (!value) return "—";
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
+}
+
+function AutoResizeTextarea({ value, ariaLabel, onChange }: { value: string; ariaLabel: string; onChange: (value: string) => void }) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const resize = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    const maxHeight = Number.parseFloat(window.getComputedStyle(textarea).maxHeight);
+    const availableHeight = Number.isFinite(maxHeight) ? maxHeight : Number.POSITIVE_INFINITY;
+    textarea.style.height = `${Math.min(textarea.scrollHeight, availableHeight)}px`;
+    textarea.style.overflowY = textarea.scrollHeight > availableHeight ? "auto" : "hidden";
+  }, []);
+
+  useLayoutEffect(() => {
+    resize();
+  }, [resize, value]);
+
+  return <textarea ref={textareaRef} aria-label={ariaLabel} value={value} onInput={resize} onChange={(event) => onChange(event.target.value)} />;
 }
 
 function statusText(status: string): string {
@@ -369,7 +388,7 @@ function TableSectionView({ section, diffMap, qualityMap, selectedRange, onChang
       const scoreDisplay = formatConfidence(score);
       const title = [diff ? `相对上次：${diff}` : "", `识别分数：${scoreDisplay}`].filter(Boolean).join("；") || undefined;
       const selected = Boolean(sectionSelection && cellRangeContains(sectionSelection, rowIndex, columnIndex));
-      return <td key={columnIndex} rowSpan={merge?.rowSpan} colSpan={merge?.colSpan} className={`${diff ? `diff-${diff}` : ""} ${merge ? "merged-cell" : ""} ${level === "low" ? "low-confidence" : ""} ${selected ? "cell-selected" : ""}`} title={title} onClick={(event) => onSelectCell(section.id, rowIndex, columnIndex, event.shiftKey)}><small className={`cell-score ${level}`}>{scoreDisplay}</small><textarea aria-label={`${section.label || section.id} 第${rowIndex + 1}行第${columnIndex + 1}列`} value={cellDisplay(value)} onChange={(event) => onChangeCell(section.id, rowIndex, columnIndex, event.target.value)} /></td>;
+      return <td key={columnIndex} rowSpan={merge?.rowSpan} colSpan={merge?.colSpan} className={`${diff ? `diff-${diff}` : ""} ${merge ? "merged-cell" : ""} ${level === "low" ? "low-confidence" : ""} ${selected ? "cell-selected" : ""}`} title={title} onClick={(event) => onSelectCell(section.id, rowIndex, columnIndex, event.shiftKey)}><small className={`cell-score ${level}`}>{scoreDisplay}</small><AutoResizeTextarea ariaLabel={`${section.label || section.id} 第${rowIndex + 1}行第${columnIndex + 1}列`} value={cellDisplay(value)} onChange={(nextValue) => onChangeCell(section.id, rowIndex, columnIndex, nextValue)} /></td>;
     })}</tr>)}</tbody></table></div>
   </div>;
 }
