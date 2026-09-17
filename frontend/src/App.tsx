@@ -5,6 +5,8 @@ import type { CompareResult, Document, Run, Scalar, Source, TableSection } from 
 
 type View = "sources" | "runs";
 type Notice = { kind: "error" | "success"; text: string } | null;
+type ConfidenceCounts = { high: number; medium: number; low: number; unknown: number };
+type DocumentStats = { sections: number; cells: number; confidence: ConfidenceCounts };
 
 const activeStatuses = new Set(["queued", "crawling", "downloading", "extracting", "exporting", "awaiting_image_selection"]);
 
@@ -32,12 +34,18 @@ function comparisonCount(summary: Run["comparison_summary"]): number {
   return summary.changed_cells + summary.added_cells + summary.removed_cells + summary.added_sections + summary.removed_sections + summary.merge_changes + summary.dimension_changes;
 }
 
-function documentStats(document: Document | null) {
-  if (!document) return { sections: 0, cells: 0, lowScore: 0 };
+function documentStats(document: Document | null): DocumentStats {
+  if (!document) return { sections: 0, cells: 0, confidence: { high: 0, medium: 0, low: 0, unknown: 0 } };
+  const confidence: ConfidenceCounts = { high: 0, medium: 0, low: 0, unknown: 0 };
+  for (const box of document.ocr_boxes ?? []) {
+    const rawScore = box.score;
+    const score = typeof rawScore === "number" ? rawScore : typeof rawScore === "string" && rawScore.trim() ? Number(rawScore) : null;
+    confidence[scoreLevel(score)] += 1;
+  }
   return {
     sections: document.sections.length,
     cells: document.sections.reduce((total, section) => total + section.cells.flat().filter((value) => value !== "" && value !== null).length, 0),
-    lowScore: Number(document.metrics.ocr_low_score_count ?? 0),
+    confidence,
   };
 }
 
@@ -295,10 +303,10 @@ function RunTable({ runs, selectedRunId, onSelect }: { runs: Run[]; selectedRunI
   return <div className="table-scroll"><table className="list-table"><thead><tr><th>状态</th><th>网址</th><th>进度</th><th>创建时间</th><th>变化</th></tr></thead><tbody>{runs.map((run) => <tr className={run.id === selectedRunId ? "selected-row" : ""} key={run.id} onClick={() => onSelect(run.id)}><td><span className={`status-badge ${run.status}`}>{statusText(run.status)}</span></td><td className="url-cell" title={run.requested_url}>{run.requested_url}</td><td><div className="progress-cell"><div className="progress-track"><span style={{ width: `${run.progress}%` }} /></div><small>{run.progress}%</small></div></td><td>{formatTime(run.created_at)}</td><td>{run.comparison_summary?.has_baseline ? (run.comparison_summary.has_changes ? `${comparisonCount(run.comparison_summary)} 项` : "无变化") : "首次"}</td></tr>)}</tbody></table></div>;
 }
 
-function RunDetail({ run, document, compare, stats, dirty, selectedRange, onSelectImage, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: { sections: number; cells: number; lowScore: number }; dirty: boolean; selectedRange: CellRange | null; onSelectImage: (candidateId: string) => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: () => void }) {
+function RunDetail({ run, document, compare, stats, dirty, selectedRange, onSelectImage, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: DocumentStats; dirty: boolean; selectedRange: CellRange | null; onSelectImage: (candidateId: string) => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: () => void }) {
   if (!run) return <section className="panel detail-empty"><div className="empty-illustration">↗</div><h2>选择一次运行</h2><p>从来源页或运行历史中选择记录，这里会显示任务进度、数据表和历史差异。</p></section>;
   return <>
-    <section className="panel run-card"><div className="run-card-top"><div><p className="eyebrow">RUN DETAIL</p><h2>{run.status === "succeeded" ? (document?.title || "识别结果") : statusText(run.status)}</h2><p className="muted">{formatTime(run.created_at)} · {run.requested_url}</p></div><span className={`status-badge large ${run.status}`}>{statusText(run.status)}</span></div><div className="progress-track large"><span style={{ width: `${run.progress}%` }} /></div><div className="run-message">{run.message}{run.error_message && <span className="error-text">：{run.error_message}</span>}</div>{run.status === "succeeded" && <div className="stat-row"><Stat label="分区" value={stats.sections} /><Stat label="非空单元格" value={stats.cells} /><Stat label="低分框" value={stats.lowScore} /></div>}{run.status === "succeeded" && <SelectedImageInfo run={run} />}</section>
+    <section className="panel run-card"><div className="run-card-top"><div><p className="eyebrow">RUN DETAIL</p><h2>{run.status === "succeeded" ? (document?.title || "识别结果") : statusText(run.status)}</h2><p className="muted">{formatTime(run.created_at)} · {run.requested_url}</p></div><span className={`status-badge large ${run.status}`}>{statusText(run.status)}</span></div><div className="progress-track large"><span style={{ width: `${run.progress}%` }} /></div><div className="run-message">{run.message}{run.error_message && <span className="error-text">：{run.error_message}</span>}</div>{run.status === "succeeded" && <><div className="stat-row"><Stat label="分区" value={stats.sections} /><Stat label="非空单元格" value={stats.cells} /></div><div className="stat-row confidence-stats" aria-label="不同颜色的识别分数数量"><Stat tone="high" label="高分框" value={stats.confidence.high} /><Stat tone="medium" label="中分框" value={stats.confidence.medium} /><Stat tone="low" label="低分框" value={stats.confidence.low} /><Stat tone="unknown" label="未提供" value={stats.confidence.unknown} /></div></>}{run.status === "succeeded" && <SelectedImageInfo run={run} />}</section>
     {run.status === "awaiting_image_selection" && <CandidatePicker candidates={run.candidates} onSelect={onSelectImage} />}
     {run.status === "succeeded" && document && <>
       <ComparisonPanel compare={compare} />
@@ -308,7 +316,7 @@ function RunDetail({ run, document, compare, stats, dirty, selectedRange, onSele
   </>;
 }
 
-function Stat({ label, value }: { label: string; value: number }) { return <div className="stat"><strong>{value}</strong><span>{label}</span></div>; }
+function Stat({ label, value, tone }: { label: string; value: number; tone?: keyof ConfidenceCounts }) { return <div className={`stat ${tone ?? ""}`}><strong>{value}</strong><span>{label}</span></div>; }
 
 function SelectedImageInfo({ run }: { run: Run }) {
   const candidate = run.candidates.find((item) => item.selected);
