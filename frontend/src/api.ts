@@ -1,5 +1,7 @@
 import type { Artifact, CompareResult, DocumentResponse, Run, Source } from "./types";
 
+export type ExportFormat = "json" | "xlsx";
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
@@ -43,9 +45,9 @@ export const api = {
     }),
   saveRevision: (runId: string, body: { base_document_sha256: string; document: object }) =>
     request<{ id: string }>(`/api/runs/${runId}/revision`, { method: "PUT", body: JSON.stringify(body) }),
-  exportRun: (runId: string, revisionId?: string) =>
+  exportRun: (runId: string, revisionId: string | undefined, format: ExportFormat) =>
     request<{ artifacts: Artifact[] }>(`/api/runs/${runId}/exports`, {
       method: "POST",
-      body: JSON.stringify({ revision_id: revisionId, formats: ["json", "xlsx"] }),
+      body: JSON.stringify({ revision_id: revisionId, formats: [format] }),
     }),
 };

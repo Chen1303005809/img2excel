@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { api } from "./api";
+import { api, type ExportFormat } from "./api";
 import { buildDiffMap, buildQualityMap, cellDisplay, cellRangeContains, cloneDocument, findMergeAt, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, rangesOverlap, scoreLevel, unmergeCellAt, type CellRange } from "./tableModel";
 import type { CompareResult, Document, Run, Scalar, Source, TableSection } from "./types";
 
@@ -162,10 +162,10 @@ function App() {
     }
   }
 
-  async function exportRun() {
+  async function exportRun(format: ExportFormat) {
     if (!selectedRunId) return;
     try {
-      const result = await api.exportRun(selectedRunId, revisionId);
+      const result = await api.exportRun(selectedRunId, revisionId, format);
       for (const artifact of result.artifacts) window.open(artifact.download_url, "_blank", "noopener,noreferrer");
     } catch (error) {
       setNotice({ kind: "error", text: (error as Error).message });
@@ -303,14 +303,14 @@ function RunTable({ runs, selectedRunId, onSelect }: { runs: Run[]; selectedRunI
   return <div className="table-scroll"><table className="list-table"><thead><tr><th>状态</th><th>网址</th><th>进度</th><th>创建时间</th><th>变化</th></tr></thead><tbody>{runs.map((run) => <tr className={run.id === selectedRunId ? "selected-row" : ""} key={run.id} onClick={() => onSelect(run.id)}><td><span className={`status-badge ${run.status}`}>{statusText(run.status)}</span></td><td className="url-cell" title={run.requested_url}>{run.requested_url}</td><td><div className="progress-cell"><div className="progress-track"><span style={{ width: `${run.progress}%` }} /></div><small>{run.progress}%</small></div></td><td>{formatTime(run.created_at)}</td><td>{run.comparison_summary?.has_baseline ? (run.comparison_summary.has_changes ? `${comparisonCount(run.comparison_summary)} 项` : "无变化") : "首次"}</td></tr>)}</tbody></table></div>;
 }
 
-function RunDetail({ run, document, compare, stats, dirty, selectedRange, onSelectImage, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: DocumentStats; dirty: boolean; selectedRange: CellRange | null; onSelectImage: (candidateId: string) => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: () => void }) {
+function RunDetail({ run, document, compare, stats, dirty, selectedRange, onSelectImage, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: DocumentStats; dirty: boolean; selectedRange: CellRange | null; onSelectImage: (candidateId: string) => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: (format: ExportFormat) => void }) {
   if (!run) return <section className="panel detail-empty"><div className="empty-illustration">↗</div><h2>选择一次运行</h2><p>从来源页或运行历史中选择记录，这里会显示任务进度、数据表和历史差异。</p></section>;
   return <>
     <section className="panel run-card"><div className="run-card-top"><div><p className="eyebrow">RUN DETAIL</p><h2>{run.status === "succeeded" ? (document?.title || "识别结果") : statusText(run.status)}</h2><p className="muted">{formatTime(run.created_at)} · {run.requested_url}</p></div><span className={`status-badge large ${run.status}`}>{statusText(run.status)}</span></div><div className="progress-track large"><span style={{ width: `${run.progress}%` }} /></div><div className="run-message">{run.message}{run.error_message && <span className="error-text">：{run.error_message}</span>}</div>{run.status === "succeeded" && <><div className="stat-row"><Stat label="分区" value={stats.sections} /><Stat label="非空单元格" value={stats.cells} /></div><div className="stat-row confidence-stats" aria-label="不同颜色的识别分数数量"><Stat tone="high" label="高分框" value={stats.confidence.high} /><Stat tone="medium" label="中分框" value={stats.confidence.medium} /><Stat tone="low" label="低分框" value={stats.confidence.low} /><Stat tone="unknown" label="未提供" value={stats.confidence.unknown} /></div></>}{run.status === "succeeded" && <SelectedImageInfo run={run} />}</section>
     {run.status === "awaiting_image_selection" && <CandidatePicker candidates={run.candidates} onSelect={onSelectImage} />}
     {run.status === "succeeded" && document && <>
       <ComparisonPanel compare={compare} />
-      <section className="panel data-panel"><div className="panel-heading"><div><p className="eyebrow">DATA PANEL</p><h2>识别数据 {dirty && <span className="unsaved-badge">有未保存修改</span>}</h2><p className="muted">可修改单元格值。合并单元格：先单击起始单元格，再按 Shift 单击结束单元格，然后点击“合并选区”。保存修订后再导出，历史原稿保持不变。</p></div><div className="button-row"><button className={dirty ? "primary" : "quiet"} onClick={onSave}>保存修订</button><button className="primary" onClick={onExport}>导出 JSON / XLSX</button></div></div><div className="data-workspace"><OriginalImageViewer run={run} /><DocumentTables document={document} compare={compare} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} /></div></section>
+      <section className="panel data-panel"><div className="panel-heading"><div><p className="eyebrow">DATA PANEL</p><h2>识别数据 {dirty && <span className="unsaved-badge">有未保存修改</span>}</h2><p className="muted">可修改单元格值。合并单元格：先单击起始单元格，再按 Shift 单击结束单元格，然后点击“合并选区”。保存修订后再导出，历史原稿保持不变。</p></div><div className="button-row"><button className={dirty ? "primary" : "quiet"} onClick={onSave}>保存修订</button><button className="primary" onClick={() => void onExport("json")}>导出 JSON</button><button className="primary" onClick={() => void onExport("xlsx")}>导出 XLSX</button></div></div><div className="data-workspace"><OriginalImageViewer run={run} /><DocumentTables document={document} compare={compare} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} /></div></section>
       <Artifacts run={run} />
     </>}
   </>;
