@@ -1,3 +1,5 @@
+// Numeric values are accepted only for legacy API payloads; normalized
+// recognized cells and user edits are persisted as strings.
 export type Scalar = string | number | null;
 
 export interface Source {

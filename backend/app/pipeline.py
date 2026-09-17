@@ -311,7 +311,7 @@ class PipelineRunner:
                 baseline_artifact = self._get_artifact(session, run.baseline_run_id, "recognized_json")
                 if baseline_artifact:
                     baseline_envelope = json.loads(self.store.absolute_path(baseline_artifact.relative_path).read_text(encoding="utf-8"))
-                    baseline_document = baseline_envelope.get("document")
+                    baseline_document = validate_document(baseline_envelope.get("document", {}))
             diff = compare_documents(document, baseline_document)
             run.comparison_summary = {"has_baseline": diff["has_baseline"], "has_changes": diff["has_changes"], **diff["summary"]}
             run.status = "succeeded"

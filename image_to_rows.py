@@ -402,15 +402,15 @@ def group_cell_text(items: list[dict[str, Any]]) -> str:
     return "\n".join(part for part in rendered if part)
 
 
-def typed_value(text: str) -> str | int | float:
-    """Convert unambiguous scalar OCR values to typed spreadsheet values."""
-    value = text.strip()
-    if re.fullmatch(r"-?\d[\d,]*(?:\.\d+)?", value):
-        numeric = value.replace(",", "")
-        return float(numeric) if "." in numeric else int(numeric)
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)%", value)
-    if match:
-        return float(match.group(1)) / 100
+def typed_value(text: str) -> str:
+    """Keep OCR cell content lossless and text-based.
+
+    Spreadsheet numeric coercion is deliberately left to neither OCR nor the
+    web preview.  In particular, ``12%`` must remain ``"12%"`` instead of
+    becoming the numeric value ``0.12``.  The exporter can still format
+    quality metrics as numbers because those metrics are not recognized cell
+    content.
+    """
     return text
 
 
@@ -752,6 +752,117 @@ def build_merged_cells(
     return cells, merged
 
 
+def _is_blank_cell(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _merge_is_nontrivial(merged: dict[str, Any]) -> bool:
+    return merged["r0"] != merged["r1"] or merged["c0"] != merged["c1"]
+
+
+def merge_adjacent_empty_cells(
+    cells: list[list[Any]], merged_cells: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Merge adjacent empty cells into non-overlapping rectangular ranges.
+
+    Existing non-trivial merges take precedence.  Empty singleton entries are
+    dropped because they do not describe a visible merge and otherwise make
+    it impossible to discover adjacent blank cells.
+    """
+    column_count = max((len(row) for row in cells), default=0)
+    if not cells or column_count == 0:
+        return [merged for merged in merged_cells if not _is_blank_cell(merged.get("value")) or _merge_is_nontrivial(merged)]
+
+    occupied: set[tuple[int, int]] = set()
+    kept: list[dict[str, Any]] = []
+    for merged in merged_cells:
+        if not _is_blank_cell(merged.get("value")) or _merge_is_nontrivial(merged):
+            kept.append(merged)
+        if _merge_is_nontrivial(merged):
+            for row in range(merged["r0"], merged["r1"] + 1):
+                for column in range(merged["c0"], merged["c1"] + 1):
+                    occupied.add((row, column))
+
+    candidates = {
+        (row, column)
+        for row in range(len(cells))
+        for column in range(column_count)
+        if (row, column) not in occupied and _is_blank_cell(cells[row][column] if column < len(cells[row]) else "")
+    }
+    if len(candidates) < 2:
+        return sorted(kept, key=lambda item: (item["r0"], item["c0"], item["r1"], item["c1"]))
+
+    row_runs: dict[int, list[tuple[int, int]]] = {}
+    for row in range(len(cells)):
+        runs: list[tuple[int, int]] = []
+        column = 0
+        while column < column_count:
+            if (row, column) not in candidates:
+                column += 1
+                continue
+            start = column
+            while column + 1 < column_count and (row, column + 1) in candidates:
+                column += 1
+            if column - start + 1 >= 2:
+                runs.append((start, column))
+            column += 1
+        row_runs[row] = runs
+
+    run_keys = {(row, run) for row, runs in row_runs.items() for run in runs}
+    consumed_runs: set[tuple[int, tuple[int, int]]] = set()
+    covered: set[tuple[int, int]] = set()
+    additions: list[dict[str, Any]] = []
+    for row in range(len(cells)):
+        for run in row_runs[row]:
+            if (row, run) in consumed_runs:
+                continue
+            end_row = row
+            while (end_row + 1, run) in run_keys:
+                end_row += 1
+            for covered_row in range(row, end_row + 1):
+                consumed_runs.add((covered_row, run))
+                covered.update((covered_row, column) for column in range(run[0], run[1] + 1))
+            additions.append(
+                {
+                    "r0": row,
+                    "r1": end_row,
+                    "c0": run[0],
+                    "c1": run[1],
+                    "value": "",
+                    "ocr_item_count": 0,
+                    "ocr_min_score": None,
+                    "ocr_max_score": None,
+                }
+            )
+
+    remaining = candidates - covered
+    for column in range(column_count):
+        row = 0
+        while row < len(cells):
+            if (row, column) not in remaining:
+                row += 1
+                continue
+            start = row
+            while row + 1 < len(cells) and (row + 1, column) in remaining:
+                row += 1
+            if row - start + 1 >= 2:
+                additions.append(
+                    {
+                        "r0": start,
+                        "r1": row,
+                        "c0": column,
+                        "c1": column,
+                        "value": "",
+                        "ocr_item_count": 0,
+                        "ocr_min_score": None,
+                        "ocr_max_score": None,
+                    }
+                )
+            row += 1
+
+    return sorted(kept + additions, key=lambda item: (item["r0"], item["c0"], item["r1"], item["c1"]))
+
+
 def cluster_rows(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     if not items:
         return []
@@ -1068,10 +1179,9 @@ def extract(input_path: Path, engine: RapidOCR | None = None) -> dict[str, Any]:
             cells[merged["r0"]][merged["c0"]] = merged["value"]
             corrections.append({"section": index, "from": value, "to": reread, "row": merged["r0"] + 1, "column": merged["c0"] + 1})
 
-        # Empty groups are useful while probing for missed OCR, but they are
-        # not meaningful merges in the exported table.  Leaving them in the
-        # contract makes a blank structural corner look like lost content.
-        merged_cells = [merged for merged in merged_cells if str(merged.get("value", "")).strip()]
+        # Preserve blank structural groups and merge adjacent blank cells so
+        # the generated preview and XLSX retain the table's empty spans.
+        merged_cells = merge_adjacent_empty_cells(cells, merged_cells)
         scores = [float(item["score"]) for item in local_items]
         label = str(region.get("band_label", ""))
         if not label and region.get("band"):

@@ -59,6 +59,33 @@ def test_revision_contract_allows_cell_values_but_rejects_structure_and_metadata
         validate_revision_document(raw, changed_metadata)
 
 
+def test_document_cells_are_strings_and_legacy_percentages_use_ocr_evidence():
+    legacy = make_document()
+    legacy["sections"][0]["cells"][0][0] = 0.08
+    legacy["sections"][0]["merged_cells"][0]["value"] = 0.08
+    legacy["ocr_boxes"] = [{"section": 1, "row": 1, "column": 1, "text": "8%", "score": 0.98}]
+
+    normalized = validate_document(legacy)
+
+    assert normalized["sections"][0]["cells"][0][0] == "8%"
+    assert normalized["sections"][0]["merged_cells"][0]["value"] == "8%"
+    assert all(isinstance(value, str) for row in normalized["sections"][0]["cells"] for value in row)
+
+
+def test_revision_contract_allows_valid_manual_merge_but_rejects_overlaps():
+    raw = validate_document(make_document())
+    revised = deepcopy(raw)
+    revised["sections"][0]["merged_cells"].append({"r0": 1, "r1": 2, "c0": 0, "c1": 0, "value": ""})
+    revised["sections"][0]["cells"][2][0] = ""
+    accepted = validate_revision_document(raw, revised)
+    assert len(accepted["sections"][0]["merged_cells"]) == 2
+
+    overlapping = deepcopy(revised)
+    overlapping["sections"][0]["merged_cells"].append({"r0": 1, "r1": 1, "c0": 0, "c1": 1, "value": ""})
+    with pytest.raises(ValueError, match="merged cell"):
+        validate_revision_document(raw, overlapping)
+
+
 def test_compare_documents_reports_changes_and_no_baseline():
     first = make_document("100")
     assert compare_documents(first, None) == {

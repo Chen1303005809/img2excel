@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { api } from "./api";
-import { buildDiffMap, buildQualityMap, cellDisplay, cloneDocument, formatConfidence, mergeMaps, parseCellInput } from "./tableModel";
+import { buildDiffMap, buildQualityMap, cellDisplay, cellRangeContains, cloneDocument, findMergeAt, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, rangesOverlap, scoreLevel, unmergeCellAt, type CellRange } from "./tableModel";
 import type { CompareResult, Document, Run, Scalar, Source, TableSection } from "./types";
 
 type View = "sources" | "runs";
@@ -58,11 +58,13 @@ function App() {
   const [newName, setNewName] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [selectedRange, setSelectedRange] = useState<CellRange | null>(null);
 
   const refreshSources = useCallback(async () => setSources(await api.sources()), []);
   const refreshRuns = useCallback(async () => setRuns(await api.runs(sourceFilter || undefined, statusFilter || undefined)), [sourceFilter, statusFilter]);
 
   const loadRun = useCallback(async (runId: string) => {
+    setSelectedRange(null);
     const run = await api.run(runId);
     setSelectedRun(run);
     setSelectedRunId(runId);
@@ -180,6 +182,54 @@ function App() {
     });
   }
 
+  function selectCell(sectionId: string, row: number, column: number, extend: boolean) {
+    setSelectedRange((current) => {
+      if (!extend || !current || current.sectionId !== sectionId) return { sectionId, r0: row, r1: row, c0: column, c1: column };
+      return {
+        sectionId,
+        r0: Math.min(current.r0, row),
+        r1: Math.max(current.r1, row),
+        c0: Math.min(current.c0, column),
+        c1: Math.max(current.c1, column),
+      };
+    });
+  }
+
+  function mergeSelectedCells() {
+    if (!document || !selectedRange) return;
+    const section = document.sections.find((item) => item.id === selectedRange.sectionId);
+    if (!section) return;
+    const discardedValues = [];
+    for (let row = selectedRange.r0; row <= selectedRange.r1; row += 1) {
+      for (let column = selectedRange.c0; column <= selectedRange.c1; column += 1) {
+        if (row === selectedRange.r0 && column === selectedRange.c0) continue;
+        const value = section.cells[row]?.[column];
+        if (value !== null && value !== undefined && value !== "") discardedValues.push(String(value));
+      }
+    }
+    if (discardedValues.length && !window.confirm(`合并后只保留左上角单元格内容，其余 ${discardedValues.length} 个单元格内容将被清空。继续吗？`)) return;
+    try {
+      setDocument(mergeCellRange(document, selectedRange));
+      setSelectedRange(null);
+    } catch (error) {
+      setNotice({ kind: "error", text: (error as Error).message });
+    }
+  }
+
+  function unmergeSelectedCell() {
+    if (!document || !selectedRange) return;
+    if (selectedRange.r0 !== selectedRange.r1 || selectedRange.c0 !== selectedRange.c1) {
+      setNotice({ kind: "error", text: "取消合并时请只选择一个已合并的单元格" });
+      return;
+    }
+    try {
+      setDocument(unmergeCellAt(document, selectedRange.sectionId, selectedRange.r0, selectedRange.c0));
+      setSelectedRange(null);
+    } catch (error) {
+      setNotice({ kind: "error", text: (error as Error).message });
+    }
+  }
+
   const stats = useMemo(() => documentStats(document), [document]);
   const isDirty = useMemo(
     () => Boolean(document && savedDocument && JSON.stringify(document) !== JSON.stringify(savedDocument)),
@@ -228,7 +278,7 @@ function App() {
         </section>
 
         <aside className="detail-column">
-          <RunDetail run={selectedRun} document={document} compare={compare} stats={stats} dirty={isDirty} onSelectImage={selectImage} onChangeCell={updateCell} onSave={saveRevision} onExport={exportRun} />
+          <RunDetail run={selectedRun} document={document} compare={compare} stats={stats} dirty={isDirty} selectedRange={selectedRange} onSelectImage={selectImage} onChangeCell={updateCell} onSelectCell={selectCell} onMerge={mergeSelectedCells} onUnmerge={unmergeSelectedCell} onSave={saveRevision} onExport={exportRun} />
         </aside>
       </main>
     </div>
@@ -245,14 +295,14 @@ function RunTable({ runs, selectedRunId, onSelect }: { runs: Run[]; selectedRunI
   return <div className="table-scroll"><table className="list-table"><thead><tr><th>状态</th><th>网址</th><th>进度</th><th>创建时间</th><th>变化</th></tr></thead><tbody>{runs.map((run) => <tr className={run.id === selectedRunId ? "selected-row" : ""} key={run.id} onClick={() => onSelect(run.id)}><td><span className={`status-badge ${run.status}`}>{statusText(run.status)}</span></td><td className="url-cell" title={run.requested_url}>{run.requested_url}</td><td><div className="progress-cell"><div className="progress-track"><span style={{ width: `${run.progress}%` }} /></div><small>{run.progress}%</small></div></td><td>{formatTime(run.created_at)}</td><td>{run.comparison_summary?.has_baseline ? (run.comparison_summary.has_changes ? `${comparisonCount(run.comparison_summary)} 项` : "无变化") : "首次"}</td></tr>)}</tbody></table></div>;
 }
 
-function RunDetail({ run, document, compare, stats, dirty, onSelectImage, onChangeCell, onSave, onExport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: { sections: number; cells: number; lowScore: number }; dirty: boolean; onSelectImage: (candidateId: string) => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSave: () => void; onExport: () => void }) {
+function RunDetail({ run, document, compare, stats, dirty, selectedRange, onSelectImage, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: { sections: number; cells: number; lowScore: number }; dirty: boolean; selectedRange: CellRange | null; onSelectImage: (candidateId: string) => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: () => void }) {
   if (!run) return <section className="panel detail-empty"><div className="empty-illustration">↗</div><h2>选择一次运行</h2><p>从来源页或运行历史中选择记录，这里会显示任务进度、数据表和历史差异。</p></section>;
   return <>
     <section className="panel run-card"><div className="run-card-top"><div><p className="eyebrow">RUN DETAIL</p><h2>{run.status === "succeeded" ? (document?.title || "识别结果") : statusText(run.status)}</h2><p className="muted">{formatTime(run.created_at)} · {run.requested_url}</p></div><span className={`status-badge large ${run.status}`}>{statusText(run.status)}</span></div><div className="progress-track large"><span style={{ width: `${run.progress}%` }} /></div><div className="run-message">{run.message}{run.error_message && <span className="error-text">：{run.error_message}</span>}</div>{run.status === "succeeded" && <div className="stat-row"><Stat label="分区" value={stats.sections} /><Stat label="非空单元格" value={stats.cells} /><Stat label="低分框" value={stats.lowScore} /></div>}{run.status === "succeeded" && <SelectedImageInfo run={run} />}</section>
     {run.status === "awaiting_image_selection" && <CandidatePicker candidates={run.candidates} onSelect={onSelectImage} />}
     {run.status === "succeeded" && document && <>
       <ComparisonPanel compare={compare} />
-      <section className="panel data-panel"><div className="panel-heading"><div><p className="eyebrow">DATA PANEL</p><h2>识别数据 {dirty && <span className="unsaved-badge">有未保存修改</span>}</h2><p className="muted">可修改单元格值。保存修订后再导出，历史原稿保持不变。</p></div><div className="button-row"><button className={dirty ? "primary" : "quiet"} onClick={onSave}>保存修订</button><button className="primary" onClick={onExport}>导出 JSON / XLSX</button></div></div><div className="data-workspace"><OriginalImageViewer run={run} /><DocumentTables document={document} compare={compare} onChangeCell={onChangeCell} /></div></section>
+      <section className="panel data-panel"><div className="panel-heading"><div><p className="eyebrow">DATA PANEL</p><h2>识别数据 {dirty && <span className="unsaved-badge">有未保存修改</span>}</h2><p className="muted">可修改单元格值。合并单元格：先单击起始单元格，再按 Shift 单击结束单元格，然后点击“合并选区”。保存修订后再导出，历史原稿保持不变。</p></div><div className="button-row"><button className={dirty ? "primary" : "quiet"} onClick={onSave}>保存修订</button><button className="primary" onClick={onExport}>导出 JSON / XLSX</button></div></div><div className="data-workspace"><OriginalImageViewer run={run} /><DocumentTables document={document} compare={compare} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} /></div></section>
       <Artifacts run={run} />
     </>}
   </>;
@@ -276,27 +326,44 @@ function CandidatePicker({ candidates, onSelect }: { candidates: Run["candidates
 
 function ComparisonPanel({ compare }: { compare: CompareResult | null }) { if (!compare || !compare.has_baseline) return <section className="panel comparison-panel"><div><p className="eyebrow">COMPARISON</p><h2>暂无历史基线</h2><p className="muted">这是该网址第一次成功识别，下一次运行后会显示差异。</p></div></section>; const { summary } = compare; return <section className={`panel comparison-panel ${compare.has_changes ? "has-changes" : "no-changes"}`}><div><p className="eyebrow">COMPARISON</p><h2>{compare.has_changes ? "发现历史变化" : "与上次相同"}</h2><p className="muted">基线运行于 {formatTime(compare.baseline?.finished_at)}。</p></div><div className="change-summary"><span><strong>{summary.changed_cells}</strong> 修改</span><span><strong>{summary.added_cells}</strong> 新增</span><span><strong>{summary.removed_cells}</strong> 删除</span><span><strong>{summary.merge_changes + summary.dimension_changes}</strong> 结构</span></div>{compare.has_changes && <div className="removed-list">{compare.sections.flatMap((section) => section.changes.filter((change) => change.kind === "removed").map((change) => <span key={`${section.section_id ?? section.baseline_section_id}-${change.row}-${change.column}`}>{section.label || section.section_id || section.baseline_section_id} · 第 {change.row} 行第 {change.column} 列：{cellDisplay(change.before)}</span>))}</div>}</section>; }
 
-function DocumentTables({ document, compare, onChangeCell }: { document: Document; compare: CompareResult | null; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void }) {
+function DocumentTables({ document, compare, selectedRange, onChangeCell, onSelectCell, onMerge, onUnmerge }: { document: Document; compare: CompareResult | null; selectedRange: CellRange | null; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void }) {
   const diffMap = buildDiffMap(compare);
   const qualityMap = buildQualityMap(document);
-  return <div className="document-tables">{document.sections.map((section) => <TableSectionView key={section.id} section={section} diffMap={diffMap} qualityMap={qualityMap} onChangeCell={onChangeCell} />)}{document.footer_notes?.length > 0 && <div className="notes-block"><strong>页脚说明</strong>{document.footer_notes.map((note, index) => <p key={index}>{String(note.text ?? "")}</p>)}</div>}</div>;
+  return <div className="document-tables"><ConfidenceGuide />{document.sections.map((section) => <TableSectionView key={section.id} section={section} diffMap={diffMap} qualityMap={qualityMap} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} />)}{document.footer_notes?.length > 0 && <div className="notes-block"><strong>页脚说明</strong>{document.footer_notes.map((note, index) => <p key={index}>{String(note.text ?? "")}</p>)}</div>}</div>;
 }
 
-function TableSectionView({ section, diffMap, qualityMap, onChangeCell }: { section: TableSection; diffMap: Map<string, string>; qualityMap: Map<string, number>; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void }) {
+function ConfidenceGuide() {
+  return <div className="confidence-guide" role="note"><strong>识别分数说明：</strong><span className="confidence-key high">绿色 ≥90%</span><span className="confidence-key medium">黄色 75%–89.9%</span><span className="confidence-key low">红色 &lt;75%</span><span className="confidence-key unknown">— 未提供</span></div>;
+}
+
+function TableSectionView({ section, diffMap, qualityMap, selectedRange, onChangeCell, onSelectCell, onMerge, onUnmerge }: { section: TableSection; diffMap: Map<string, string>; qualityMap: Map<string, number>; selectedRange: CellRange | null; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void }) {
   const { starts, covered } = mergeMaps(section);
   const columns = Math.max(section.x_edges.length - 1, ...section.cells.map((row) => row.length), 1);
-  return <div className="table-block"><div className="section-band">{section.label || section.id}<span>{section.ocr_count} 个 OCR 框 · {section.strategy}</span></div><div className="table-scroll"><table className="data-table"><tbody>{section.cells.map((row, rowIndex) => <tr key={rowIndex}>{Array.from({ length: columns }, (_, columnIndex) => {
-    const key = `${rowIndex}:${columnIndex}`;
-    if (covered.has(key)) return null;
-    const merge = starts.get(key);
-    const value = row[columnIndex] ?? "";
-    const diff = diffMap.get(`${section.id}:${rowIndex}:${columnIndex}`);
-    const score = qualityMap.get(`${section.id}:${rowIndex}:${columnIndex}`) ?? merge?.score ?? null;
-    const lowConfidence = score !== null && score < 0.75;
-    const confidence = formatConfidence(score);
-    const title = [diff ? `相对上次：${diff}` : "", `OCR 置信度：${confidence}`].filter(Boolean).join("；") || undefined;
-    return <td key={columnIndex} rowSpan={merge?.rowSpan} colSpan={merge?.colSpan} className={`${diff ? `diff-${diff}` : ""} ${merge ? "merged-cell" : ""} ${lowConfidence ? "low-confidence" : ""}`} title={title}><small className={`cell-score ${lowConfidence ? "low" : ""}`}>置信度 {confidence}</small><textarea aria-label={`${section.label || section.id} 第${rowIndex + 1}行第${columnIndex + 1}列`} value={cellDisplay(value)} onChange={(event) => onChangeCell(section.id, rowIndex, columnIndex, event.target.value)} /></td>;
-  })}</tr>)}</tbody></table></div></div>;
+  const sectionSelection = selectedRange?.sectionId === section.id ? selectedRange : null;
+  const selectionIsSingleCell = sectionSelection?.r0 === sectionSelection?.r1 && sectionSelection?.c0 === sectionSelection?.c1;
+  const selectedMerge = sectionSelection && selectionIsSingleCell ? findMergeAt(section, sectionSelection.r0, sectionSelection.c0) : null;
+  const selectionOverlapsMerge = sectionSelection ? section.merged_cells.some((merged) => rangesOverlap(sectionSelection, merged)) : false;
+  const selectionSize = sectionSelection ? (sectionSelection.r1 - sectionSelection.r0 + 1) * (sectionSelection.c1 - sectionSelection.c0 + 1) : 0;
+
+  return <div className="table-block">
+    <div className="section-band">
+      <div><strong>{section.label || section.id}</strong><span>{section.ocr_count} 个 OCR 框 · {section.strategy}</span></div>
+      <div className="table-tools">{sectionSelection && <span className="selection-hint">已选 {selectionSize} 个单元格</span>}<button type="button" className="table-action" disabled={!sectionSelection || selectionSize < 2 || selectionOverlapsMerge} onClick={onMerge}>合并选区</button><button type="button" className="table-action" disabled={!selectedMerge} onClick={onUnmerge}>取消合并</button></div>
+    </div>
+    <div className="table-scroll"><table className="data-table"><tbody>{section.cells.map((row, rowIndex) => <tr key={rowIndex}>{Array.from({ length: columns }, (_, columnIndex) => {
+      const key = `${rowIndex}:${columnIndex}`;
+      if (covered.has(key)) return null;
+      const merge = starts.get(key);
+      const value = row[columnIndex] ?? "";
+      const diff = diffMap.get(`${section.id}:${rowIndex}:${columnIndex}`);
+      const score = qualityMap.get(`${section.id}:${rowIndex}:${columnIndex}`) ?? merge?.score ?? null;
+      const level = scoreLevel(score);
+      const scoreDisplay = formatConfidence(score);
+      const title = [diff ? `相对上次：${diff}` : "", `识别分数：${scoreDisplay}`].filter(Boolean).join("；") || undefined;
+      const selected = Boolean(sectionSelection && cellRangeContains(sectionSelection, rowIndex, columnIndex));
+      return <td key={columnIndex} rowSpan={merge?.rowSpan} colSpan={merge?.colSpan} className={`${diff ? `diff-${diff}` : ""} ${merge ? "merged-cell" : ""} ${level === "low" ? "low-confidence" : ""} ${selected ? "cell-selected" : ""}`} title={title} onClick={(event) => onSelectCell(section.id, rowIndex, columnIndex, event.shiftKey)}><small className={`cell-score ${level}`}>{scoreDisplay}</small><textarea aria-label={`${section.label || section.id} 第${rowIndex + 1}行第${columnIndex + 1}列`} value={cellDisplay(value)} onChange={(event) => onChangeCell(section.id, rowIndex, columnIndex, event.target.value)} /></td>;
+    })}</tr>)}</tbody></table></div>
+  </div>;
 }
 
 function Artifacts({ run }: { run: Run }) { return <section className="panel artifacts-panel"><div className="panel-heading"><div><p className="eyebrow">ARTIFACTS</p><h2>产物</h2></div></div><div className="artifact-list">{run.artifacts.map((artifact) => <a key={artifact.id} href={artifact.download_url} target="_blank" rel="noreferrer"><span>{artifact.kind === "source_image" ? "原图" : artifact.kind.includes("xlsx") ? "XLSX" : artifact.kind.includes("json") ? "JSON" : artifact.kind}</span><small>{artifact.filename}</small></a>)}</div></section>; }

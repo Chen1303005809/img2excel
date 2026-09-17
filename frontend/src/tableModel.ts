@@ -1,6 +1,9 @@
-import type { CompareResult, Document, Scalar, TableSection } from "./types";
+import type { CompareResult, Document, MergedCell, Scalar, TableSection } from "./types";
 
 export type MergeStart = { rowSpan: number; colSpan: number; score: number | null };
+export type CellBounds = { r0: number; r1: number; c0: number; c1: number };
+export type CellRange = CellBounds & { sectionId: string };
+export type ScoreLevel = "high" | "medium" | "low" | "unknown";
 
 export function cloneDocument(document: Document): Document {
   return structuredClone(document);
@@ -22,6 +25,60 @@ export function mergeMaps(section: TableSection): { starts: Map<string, MergeSta
     }
   }
   return { starts, covered };
+}
+
+export function cellRangeContains(range: CellBounds, row: number, column: number): boolean {
+  return row >= range.r0 && row <= range.r1 && column >= range.c0 && column <= range.c1;
+}
+
+export function rangesOverlap(left: CellBounds, right: CellBounds): boolean {
+  return !(left.r1 < right.r0 || right.r1 < left.r0 || left.c1 < right.c0 || right.c1 < left.c0);
+}
+
+export function findMergeAt(section: TableSection, row: number, column: number): MergedCell | null {
+  return section.merged_cells.find((merged) => cellRangeContains(merged, row, column)) ?? null;
+}
+
+function sectionColumnCount(section: TableSection): number {
+  return Math.max(section.x_edges.length - 1, ...section.cells.map((row) => row.length), 1);
+}
+
+export function mergeCellRange(document: Document, range: CellRange): Document {
+  const section = document.sections.find((item) => item.id === range.sectionId);
+  if (!section) throw new Error("找不到要合并的表格分区");
+  const columns = sectionColumnCount(section);
+  if (range.r0 < 0 || range.c0 < 0 || range.r1 >= section.cells.length || range.c1 >= columns || range.r0 > range.r1 || range.c0 > range.c1) {
+    throw new Error("合并范围超出表格边界");
+  }
+  if (range.r0 === range.r1 && range.c0 === range.c1) throw new Error("请选择至少两个单元格后再合并");
+  if (section.merged_cells.some((merged) => rangesOverlap(range, merged))) {
+    throw new Error("合并范围与已有合并单元格重叠，请先取消原合并");
+  }
+
+  const next = cloneDocument(document);
+  const target = next.sections.find((item) => item.id === range.sectionId);
+  if (!target) throw new Error("找不到要合并的表格分区");
+  const value = target.cells[range.r0]?.[range.c0] ?? "";
+  for (let row = range.r0; row <= range.r1; row += 1) {
+    for (let column = range.c0; column <= range.c1; column += 1) {
+      if (row === range.r0 && column === range.c0) continue;
+      if (column < target.cells[row].length) target.cells[row][column] = "";
+    }
+  }
+  target.merged_cells.push({ r0: range.r0, r1: range.r1, c0: range.c0, c1: range.c1, value, ocr_min_score: null });
+  return next;
+}
+
+export function unmergeCellAt(document: Document, sectionId: string, row: number, column: number): Document {
+  const section = document.sections.find((item) => item.id === sectionId);
+  if (!section || !findMergeAt(section, row, column)) throw new Error("请选择一个已合并的单元格");
+  const next = cloneDocument(document);
+  const target = next.sections.find((item) => item.id === sectionId);
+  if (!target) throw new Error("找不到要拆分的表格分区");
+  const index = target.merged_cells.findIndex((merged) => cellRangeContains(merged, row, column));
+  if (index < 0) throw new Error("请选择一个已合并的单元格");
+  target.merged_cells.splice(index, 1);
+  return next;
 }
 
 export function buildQualityMap(document: Document): Map<string, number> {
@@ -54,10 +111,9 @@ export function cellDisplay(value: Scalar): string {
   return value === null || value === "" ? "" : String(value);
 }
 
-export function parseCellInput(value: string, previous: Scalar): Scalar {
-  if (value === "") return "";
-  if (/^-?\d+(\.\d+)?%$/.test(value)) return Number(value.slice(0, -1)) / 100;
-  if (typeof previous === "number" && /^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+export function parseCellInput(value: string, _previous: Scalar): Scalar {
+  // Recognized and manually edited cell content is always text.  Converting
+  // percentages here would turn a visible "12%" into 0.12 in the preview.
   return value;
 }
 
@@ -65,4 +121,11 @@ export function formatConfidence(score: number | null): string {
   if (score === null || !Number.isFinite(score)) return "—";
   const normalized = Math.max(0, Math.min(1, score));
   return `${(normalized * 100).toFixed(1)}%`;
+}
+
+export function scoreLevel(score: number | null): ScoreLevel {
+  if (score === null || !Number.isFinite(score)) return "unknown";
+  if (score >= 0.9) return "high";
+  if (score >= 0.75) return "medium";
+  return "low";
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDiffMap, buildQualityMap, formatConfidence, mergeMaps, parseCellInput } from "./tableModel";
+import { buildDiffMap, buildQualityMap, cellRangeContains, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, scoreLevel, unmergeCellAt } from "./tableModel";
 import type { Document, TableSection } from "./types";
 
 const section: TableSection = {
@@ -53,9 +53,9 @@ describe("table view model", () => {
     expect(map.get("S01:1:1")).toBe("changed");
   });
 
-  it("parses explicit percentages while preserving text cells", () => {
-    expect(parseCellInput("12.5%", "")).toBe(0.125);
-    expect(parseCellInput("42", 0)).toBe(42);
+  it("keeps recognized and edited cell content as text", () => {
+    expect(parseCellInput("12.5%", "")).toBe("12.5%");
+    expect(parseCellInput("42", 0)).toBe("42");
     expect(parseCellInput("42", "编号")).toBe("42");
     expect(parseCellInput("", 42)).toBe("");
   });
@@ -64,5 +64,28 @@ describe("table view model", () => {
     expect(formatConfidence(0.987)).toBe("98.7%");
     expect(formatConfidence(0.61)).toBe("61.0%");
     expect(formatConfidence(null)).toBe("—");
+  });
+
+  it("assigns score colors to high, medium, and low ranges", () => {
+    expect(scoreLevel(0.9)).toBe("high");
+    expect(scoreLevel(0.75)).toBe("medium");
+    expect(scoreLevel(0.749)).toBe("low");
+    expect(scoreLevel(null)).toBe("unknown");
+  });
+
+  it("merges a selected range and keeps the top-left value", () => {
+    const range = { sectionId: "S01", r0: 1, r1: 1, c0: 0, c1: 1 };
+    const merged = mergeCellRange(document, range);
+    expect(merged.sections[0].cells[1]).toEqual(["甲", ""]);
+    expect(merged.sections[0].merged_cells).toContainEqual({ r0: 1, r1: 1, c0: 0, c1: 1, value: "甲", ocr_min_score: null });
+    expect(cellRangeContains(range, 1, 1)).toBe(true);
+    expect(cellRangeContains(range, 0, 1)).toBe(false);
+    expect(document.sections[0].cells[1][1]).toBe(10);
+  });
+
+  it("can remove a manual merge", () => {
+    const merged = mergeCellRange(document, { sectionId: "S01", r0: 1, r1: 1, c0: 0, c1: 1 });
+    const split = unmergeCellAt(merged, "S01", 1, 0);
+    expect(split.sections[0].merged_cells).toEqual(section.merged_cells);
   });
 });

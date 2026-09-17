@@ -51,6 +51,7 @@ python image2xlsx.py C:\path\input.png C:\path\output.xlsx --json-output C:\path
 ## 集成边界
 
 - `image_to_rows.py` 是识别引擎，输出 `sections[].cells`、`merged_cells`、`ocr_boxes`、彩色说明框和 `metrics`。
+- `sections[].cells` 和 `merged_cells[].value` 始终按识别原文字符串保存；百分号、千位分隔符等不会被自动转成数值。历史文档只有在同一单元格的 OCR 框明确包含 `%` 时才恢复百分号，避免把普通小数误判为百分数。
 - `rows.json` 是稳定接口。Web API、桌面程序、批处理或消息队列都只需调用一次 `extract(image_path)`。
 - `build_xlsx_portable.py` 只负责把 JSON 写成 Excel，不参与 OCR。以后替换 Excel 库时不需要改识别逻辑。
 

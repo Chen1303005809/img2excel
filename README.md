@@ -62,8 +62,8 @@ cd frontend && npm run dev
 2. 点击“立即运行”，API 只创建 `queued` 记录；Worker 负责后续阶段。
 3. Crawl4AI 按 `yafco_image` 页面配置等待 `.ya-con img`，从 `.ya-con img[src]` 提取候选图片。
 4. 0 张图片会失败；1 张自动识别；多张进入候选选择，避免静默选错。
-5. 识别结果保留 `image_to_rows` v2 文档，并封装为 `schema_version=1` 的运行文档。
-6. 数据面板支持真实 `rowSpan`/`colSpan` 的表格预览、单元格编辑、低置信度提示和显式保存修订。
+5. 识别结果保留 `image_to_rows` v2 文档，并封装为 `schema_version=1` 的运行文档；所有识别单元格按原文字符串保存（百分数不会转换成小数），生成表格时会把相邻的空白单元格合并为矩形结构。
+6. 数据面板支持真实 `rowSpan`/`colSpan` 的表格预览、单元格编辑、识别分数颜色分级和显式保存修订；单击起始单元格后按住 Shift 单击结束单元格，可手动合并或取消合并，再导出修订后的 JSON/XLSX。
 7. 修订写入 `revisions/`，原始识别 JSON/XLSX 永不覆盖。下一次运行默认比较上一条成功运行的原始 OCR 文档。
 
 运行产物结构：

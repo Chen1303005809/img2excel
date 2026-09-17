@@ -133,8 +133,6 @@ def write_workbook(data: dict[str, Any], output_path: Path) -> None:
             set_row_height(result, row_index, padded, section_columns)
 
         for merged in section.get("merged_cells", []):
-            if not str(merged.get("value", "")).strip():
-                continue
             if merged["r0"] == merged["r1"] and merged["c0"] == merged["c1"]:
                 continue
             row0 = current_row + merged["r0"]

@@ -3,11 +3,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from typing import Any, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
+# Numbers remain accepted at the input boundary for legacy artifacts, but
+# validated document cells and merged-cell values are normalized to strings.
 Scalar: TypeAlias = str | int | float | None
 
 
@@ -69,13 +72,66 @@ class DocumentEnvelope(BaseModel):
     document: CanonicalDocument
 
 
+def _ocr_text_by_cell(data: dict[str, Any]) -> dict[tuple[int, int, int], list[str]]:
+    """Index legacy OCR text by its one-based document coordinates."""
+    result: dict[tuple[int, int, int], list[str]] = {}
+    for item in data.get("ocr_boxes", []):
+        try:
+            key = (int(item["section"]), int(item["row"]), int(item["column"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        text = item.get("text")
+        if text is not None:
+            result.setdefault(key, []).append(str(text))
+    return result
+
+
+def _stringify_cell_value(value: Scalar, ocr_text: list[str] | None = None) -> str:
+    """Return a stable text representation without guessing numeric meaning."""
+    if isinstance(value, str):
+        return value
+    if ocr_text:
+        joined = "".join(part for part in ocr_text if part).strip()
+        # Existing runs may have already stored 8% as 0.08.  Recover the
+        # original percent only when the same cell's OCR evidence contains a
+        # numeric percent marker; never infer a percent from the number alone.
+        if re.search(r"\d", joined) and ("%" in joined or "％" in joined):
+            return joined
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _normalize_cell_values(data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize recognized cells to strings while preserving legacy percents."""
+    result = copy.deepcopy(data)
+    ocr_text_by_cell = _ocr_text_by_cell(result)
+    for section_index, section in enumerate(result.get("sections", []), start=1):
+        for row_index, row in enumerate(section.get("cells", []), start=1):
+            for column_index, value in enumerate(row, start=1):
+                row[column_index - 1] = _stringify_cell_value(
+                    value,
+                    ocr_text_by_cell.get((section_index, row_index, column_index)),
+                )
+        for merged in section.get("merged_cells", []):
+            try:
+                key = (section_index, int(merged["r0"]) + 1, int(merged["c0"]) + 1)
+            except (KeyError, TypeError, ValueError):
+                key = None
+            merged["value"] = _stringify_cell_value(merged.get("value"), ocr_text_by_cell.get(key) if key else None)
+    return result
+
+
 def validate_document(data: dict[str, Any]) -> dict[str, Any]:
-    return CanonicalDocument.model_validate(data).model_dump(mode="json", exclude_none=False)
+    canonical = CanonicalDocument.model_validate(data).model_dump(mode="json", exclude_none=False)
+    return _normalize_cell_values(canonical)
 
 
 def validate_envelope(data: dict[str, Any]) -> dict[str, Any]:
     """Validate the persisted application wrapper without narrowing document fields."""
-    return DocumentEnvelope.model_validate(data).model_dump(mode="json", exclude_none=False)
+    envelope = DocumentEnvelope.model_validate(data).model_dump(mode="json", exclude_none=False)
+    envelope["document"] = _normalize_cell_values(envelope["document"])
+    return envelope
 
 
 def document_json_bytes(data: dict[str, Any]) -> bytes:
@@ -116,24 +172,57 @@ def structure_signature(data: dict[str, Any]) -> list[dict[str, Any]]:
     return signature
 
 
+def _revision_structure_signature(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the immutable grid shape; merge geometry is user-editable."""
+    signature = structure_signature(data)
+    for section in signature:
+        section.pop("merges", None)
+    return signature
+
+
 def _editable_mask(data: dict[str, Any]) -> dict[str, Any]:
     masked = copy.deepcopy(data)
     for section in masked.get("sections", []):
         for row in section.get("cells", []):
             for index in range(len(row)):
                 row[index] = "__EDITABLE_CELL__"
-        for merged in section.get("merged_cells", []):
-            merged["value"] = "__EDITABLE_CELL__"
+        # Merge geometry and its duplicate top-left value are edited as one
+        # user-controlled presentation detail and validated separately.
+        section["merged_cells"] = []
     return masked
+
+
+def _ranges_overlap(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> bool:
+    left_r0, left_r1, left_c0, left_c1 = left
+    right_r0, right_r1, right_c0, right_c1 = right
+    return not (left_r1 < right_r0 or right_r1 < left_r0 or left_c1 < right_c0 or right_c1 < left_c0)
+
+
+def _validate_merge_geometry(data: dict[str, Any]) -> None:
+    for section in data.get("sections", []):
+        rows = section.get("cells", [])
+        column_count = section_column_count(section)
+        seen: list[tuple[int, int, int, int]] = []
+        for index, merged in enumerate(section.get("merged_cells", []), start=1):
+            current = (int(merged["r0"]), int(merged["r1"]), int(merged["c0"]), int(merged["c1"]))
+            r0, r1, c0, c1 = current
+            if r0 < 0 or c0 < 0 or r0 > r1 or c0 > c1:
+                raise ValueError(f"merged cell {index} has invalid range")
+            if r1 >= len(rows) or c1 >= column_count:
+                raise ValueError(f"merged cell {index} is outside the table bounds")
+            if any(_ranges_overlap(current, previous) for previous in seen):
+                raise ValueError(f"merged cell {index} overlaps another merged cell")
+            seen.append(current)
 
 
 def validate_revision_document(raw: dict[str, Any], revised: dict[str, Any]) -> dict[str, Any]:
     raw_valid = validate_document(raw)
     revised_valid = validate_document(revised)
-    if structure_signature(raw_valid) != structure_signature(revised_valid):
-        raise ValueError("only cell values may be edited; table structure must remain unchanged")
+    if _revision_structure_signature(raw_valid) != _revision_structure_signature(revised_valid):
+        raise ValueError("only cell values or merged-cell geometry may be edited; table structure must remain unchanged")
     if _editable_mask(raw_valid) != _editable_mask(revised_valid):
-        raise ValueError("only cell values may be edited; document metadata must remain unchanged")
+        raise ValueError("only cell values or merged-cell geometry may be edited; document metadata must remain unchanged")
+    _validate_merge_geometry(revised_valid)
     return revised_valid
 
 

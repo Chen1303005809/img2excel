@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from io import BytesIO
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 from backend.app.artifacts import record_artifact
 from backend.app.contracts import document_sha256
@@ -103,6 +105,7 @@ def test_document_revision_preserves_raw_document_and_exports_revision(tmp_path)
         recognized = client.get(f"/api/runs/{run_id}/document").json()
         assert recognized["view"] == "recognized"
         assert recognized["recognized_document_sha256"] == document_sha256(raw_document)
+        assert recognized["document"]["sections"][0]["cells"] == [["品种", ""], ["甲", "100"], ["乙", "0.5"]]
 
         revised = deepcopy(raw_document)
         revised["sections"][0]["cells"][1][1] = "200"
@@ -137,6 +140,39 @@ def test_document_revision_preserves_raw_document_and_exports_revision(tmp_path)
             downloaded = client.get(artifact["download_url"])
             assert downloaded.status_code == 200
             assert downloaded.content
+
+
+def test_manual_merge_revision_is_exported_to_xlsx(tmp_path):
+    from backend.app.config import Settings
+
+    settings_data = tmp_path / "data"
+    settings = Settings(data_dir=settings_data, database_url=f"sqlite:///{settings_data / 'app.db'}")
+    app = create_app(settings)
+    store = app.state.artifact_store
+    with TestClient(app) as client:
+        _, run_id, raw_document = _persist_successful_run(app, store)
+        recognized = client.get(f"/api/runs/{run_id}/document").json()
+
+        revised = deepcopy(raw_document)
+        revised["sections"][0]["cells"][1][0] = ""
+        revised["sections"][0]["cells"][1][1] = ""
+        revised["sections"][0]["cells"][2][0] = ""
+        revised["sections"][0]["cells"][2][1] = ""
+        revised["sections"][0]["merged_cells"].append({"r0": 1, "r1": 2, "c0": 0, "c1": 1, "value": ""})
+        save = client.put(
+            f"/api/runs/{run_id}/revision",
+            json={"base_document_sha256": recognized["recognized_document_sha256"], "document": revised},
+        )
+        assert save.status_code == 200
+
+        exported = client.post(f"/api/runs/{run_id}/exports", json={"revision_id": save.json()["id"], "formats": ["xlsx"]})
+        assert exported.status_code == 200
+        artifact = exported.json()["artifacts"][0]
+        workbook = load_workbook(BytesIO(client.get(artifact["download_url"]).content))
+        try:
+            assert "A7:B8" in {str(item) for item in workbook["识别结果"].merged_cells.ranges}
+        finally:
+            workbook.close()
 
 
 def test_compare_endpoint_uses_locked_successful_baseline(tmp_path):

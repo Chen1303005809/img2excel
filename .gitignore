@@ -17,4 +17,4 @@ __pycache__
 .playwright-browsers/
 
 crawl4ai_outputs
-outputs/
+.env
