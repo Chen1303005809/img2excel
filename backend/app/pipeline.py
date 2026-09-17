@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .artifacts import ArtifactStore, record_artifact
 from .config import Settings
-from .contracts import document_sha256, validate_document, validate_envelope
+from .contracts import validate_document, validate_envelope
 from .crawling import Crawl4AIAdapter, CrawlFailure, ImageCandidateData
 from .diffing import compare_documents
 from .exporters import ExportContext, ExporterRegistry
@@ -154,6 +154,36 @@ class PipelineRunner:
     def _candidates(self, session: Session, run_id: str) -> list[ImageCandidate]:
         return list(session.scalars(select(ImageCandidate).where(ImageCandidate.run_id == run_id).order_by(ImageCandidate.ordinal)))
 
+    def _load_unchanged_document(self, run: Run, image_sha: str) -> dict[str, Any] | None:
+        """Reuse the previous raw OCR document when the selected image is byte-identical."""
+        if not run.baseline_run_id or not image_sha:
+            return None
+
+        with self.session_factory() as session:
+            baseline_candidate = self._selected_candidate(session, run.baseline_run_id)
+            baseline_artifact = self._get_artifact(session, run.baseline_run_id, "recognized_json")
+            if baseline_artifact is None:
+                return None
+            if baseline_candidate is not None and baseline_candidate.sha256 and baseline_candidate.sha256 != image_sha:
+                return None
+            baseline_path = self.store.absolute_path(baseline_artifact.relative_path)
+
+        try:
+            payload = validate_envelope(json.loads(baseline_path.read_text(encoding="utf-8")))
+            if payload.get("image_sha256") != image_sha:
+                return None
+            return validate_document(payload["document"])
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     async def process(self, run_id: str) -> None:
         try:
             with self.session_factory() as session:
@@ -251,9 +281,15 @@ class PipelineRunner:
             if candidate is None:
                 raise PipelineError("image_not_selected", "no image candidate has been selected")
 
-        if candidate.local_path:
+        if candidate.local_path and self.store.absolute_path(candidate.local_path).is_file():
             image_path = self.store.absolute_path(candidate.local_path)
-            image_sha = candidate.sha256 or ""
+            image_sha = candidate.sha256 or self._file_sha256(image_path)
+            if not candidate.sha256:
+                with self.session_factory() as session:
+                    candidate_record = session.get(ImageCandidate, candidate.id)
+                    if candidate_record is not None:
+                        candidate_record.sha256 = image_sha
+                        session.commit()
         else:
             self._update_run(run_id, stage="downloading", progress=30, message="正在下载图片")
             downloaded = await self.downloader.download(
@@ -278,10 +314,31 @@ class PipelineRunner:
             image_path = stored.absolute_path
             image_sha = downloaded.sha256
 
-        self._update_run(run_id, status="extracting", stage="extracting", progress=45, message="正在识别图片表格")
-        async with self.ocr_semaphore:
-            document = await asyncio.to_thread(self.extractor.extract, image_path)
-        document = validate_document(document)
+        with self.session_factory() as session:
+            run = self._get_run(session, run_id)
+        document = self._load_unchanged_document(run, image_sha)
+        recognition_skipped = document is not None
+        if recognition_skipped:
+            self._update_run(
+                run_id,
+                status="exporting",
+                stage="exporting",
+                progress=70,
+                message="图片 SHA-256 未变化，跳过识别并复用上次结果",
+                recognition_skipped=True,
+            )
+        else:
+            self._update_run(
+                run_id,
+                status="extracting",
+                stage="extracting",
+                progress=45,
+                message="正在识别图片表格",
+                recognition_skipped=False,
+            )
+            async with self.ocr_semaphore:
+                document = await asyncio.to_thread(self.extractor.extract, image_path)
+            document = validate_document(document)
 
         with self.session_factory() as session:
             run = self._get_run(session, run_id)
@@ -316,7 +373,7 @@ class PipelineRunner:
             run.status = "succeeded"
             run.stage = "succeeded"
             run.progress = 100
-            run.message = "处理完成"
+            run.message = "图片未变化，已跳过识别并复用结果" if recognition_skipped else "处理完成"
             run.finished_at = utc_now()
             run.heartbeat_at = utc_now()
             session.commit()

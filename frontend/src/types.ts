@@ -8,6 +8,9 @@ export interface Source {
   url: string;
   profile_key: string;
   enabled: boolean;
+  schedule_enabled: boolean;
+  schedule_interval_minutes: number;
+  next_run_at: string | null;
   created_at: string;
   updated_at: string;
   latest_run: RunSummary | null;
@@ -21,6 +24,7 @@ export interface RunSummary {
   message: string;
   created_at: string;
   finished_at: string | null;
+  recognition_skipped: boolean;
   comparison_summary: RunComparisonSummary | null;
 }
 

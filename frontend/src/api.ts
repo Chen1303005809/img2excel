@@ -22,9 +22,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   sources: () => request<Source[]>("/api/sources"),
-  createSource: (body: { url: string; name?: string }) =>
+  createSource: (body: { url: string; name?: string; schedule_enabled?: boolean; schedule_interval_minutes?: number }) =>
     request<Source>("/api/sources", { method: "POST", body: JSON.stringify(body) }),
-  updateSource: (id: string, body: Partial<Pick<Source, "name" | "enabled" | "url">>) =>
+  updateSource: (id: string, body: Partial<Pick<Source, "name" | "enabled" | "url" | "schedule_enabled" | "schedule_interval_minutes">>) =>
     request<Source>(`/api/sources/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   createRun: (sourceId: string) =>
     request<Run>(`/api/sources/${sourceId}/runs`, { method: "POST" }),

@@ -16,6 +16,7 @@ from .app.database import build_engine, run_migrations
 from .app.models import Base, Run, utc_now
 from .app.pipeline import PipelineRunner
 from .app.seed import seed_sources
+from .app.scheduling import ScheduleManager
 
 
 class JobQueue:
@@ -124,6 +125,7 @@ async def run_worker(settings: Settings | None = None) -> None:
         seed_sources(session)
     queue = JobQueue(session_factory, settings)
     queue.recover_stale()
+    scheduler = ScheduleManager(session_factory)
     store = ArtifactStore(settings.resolved_data_dir)
     crawl_semaphore = asyncio.Semaphore(max(1, settings.effective_crawl_concurrency))
     ocr_semaphore = asyncio.Semaphore(max(1, settings.ocr_concurrency))
@@ -142,6 +144,7 @@ async def run_worker(settings: Settings | None = None) -> None:
         heartbeats: dict[str, asyncio.Task[None]] = {}
         try:
             while True:
+                await asyncio.to_thread(scheduler.enqueue_due_runs)
                 while len(active) < max(1, settings.worker_concurrency):
                     job = await asyncio.to_thread(queue.claim_job)
                     if job is None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -24,6 +24,7 @@ from .config import Settings
 from .diffing import compare_documents
 from .exporters import ExportContext, ExporterRegistry
 from .models import Artifact, DocumentRevision, ImageCandidate, Run, Source, utc_now
+from .scheduling import DEFAULT_SCHEDULE_INTERVAL_MINUTES, create_queued_run, schedule_next_at
 from .url_utils import InvalidSourceUrl, default_source_name, normalize_url, validate_fetch_host
 
 
@@ -32,6 +33,8 @@ class SourceCreate(BaseModel):
 
     url: str
     name: str | None = Field(default=None, max_length=200)
+    schedule_enabled: bool = False
+    schedule_interval_minutes: int = Field(default=DEFAULT_SCHEDULE_INTERVAL_MINUTES, ge=1, le=43_200)
 
 
 class SourceUpdate(BaseModel):
@@ -40,6 +43,8 @@ class SourceUpdate(BaseModel):
     url: str | None = None
     name: str | None = Field(default=None, max_length=200)
     enabled: bool | None = None
+    schedule_enabled: bool | None = None
+    schedule_interval_minutes: int | None = Field(default=None, ge=1, le=43_200)
 
 
 class ImageSelectionRequest(BaseModel):
@@ -57,7 +62,11 @@ class ExportRequest(BaseModel):
 
 
 def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
+    if value is None:
+        return None
+    # SQLite returns timezone-aware values as naive datetimes. They are stored
+    # from utc_now(), so restore the UTC marker before sending them to clients.
+    return value.replace(tzinfo=timezone.utc).isoformat() if value.tzinfo is None else value.isoformat()
 
 
 def _source_payload(source: Source, latest_run: Run | None = None) -> dict[str, Any]:
@@ -67,6 +76,9 @@ def _source_payload(source: Source, latest_run: Run | None = None) -> dict[str, 
         "url": source.url,
         "profile_key": source.profile_key,
         "enabled": source.enabled,
+        "schedule_enabled": source.schedule_enabled,
+        "schedule_interval_minutes": source.schedule_interval_minutes,
+        "next_run_at": _iso(source.next_run_at),
         "created_at": _iso(source.created_at),
         "updated_at": _iso(source.updated_at),
         "latest_run": _run_summary(latest_run) if latest_run else None,
@@ -84,6 +96,7 @@ def _run_summary(run: Run | None) -> dict[str, Any] | None:
         "message": run.message,
         "created_at": _iso(run.created_at),
         "finished_at": _iso(run.finished_at),
+        "recognition_skipped": run.recognition_skipped,
         "comparison_summary": run.comparison_summary,
     }
 
@@ -149,6 +162,7 @@ def _run_payload(session: Session, run: Run, store: ArtifactStore) -> dict[str, 
         "error_code": run.error_code,
         "error_message": run.error_message,
         "comparison_summary": run.comparison_summary,
+        "recognition_skipped": run.recognition_skipped,
         "attempt": run.attempt,
         "created_at": _iso(run.created_at),
         "started_at": _iso(run.started_at),
@@ -207,6 +221,7 @@ def build_router(session_factory: sessionmaker, store: ArtifactStore, settings: 
             raise HTTPException(status_code=422, detail=str(error)) from error
         if session.scalar(select(Source).where(Source.normalized_url == normalized)) is not None:
             raise HTTPException(status_code=409, detail="source URL already exists")
+        now = utc_now()
         source = Source(
             id=str(uuid4()),
             name=body.name or default_source_name(normalized),
@@ -214,6 +229,9 @@ def build_router(session_factory: sessionmaker, store: ArtifactStore, settings: 
             normalized_url=normalized,
             profile_key="yafco_image",
             enabled=True,
+            schedule_enabled=body.schedule_enabled,
+            schedule_interval_minutes=body.schedule_interval_minutes,
+            next_run_at=schedule_next_at(now, body.schedule_interval_minutes) if body.schedule_enabled else None,
         )
         session.add(source)
         session.commit()
@@ -225,6 +243,7 @@ def build_router(session_factory: sessionmaker, store: ArtifactStore, settings: 
         source = session.get(Source, source_id)
         if source is None:
             raise HTTPException(status_code=404, detail="source not found")
+        schedule_changed = body.schedule_enabled is not None or body.schedule_interval_minutes is not None
         if body.url is not None:
             try:
                 normalized = normalize_url(body.url)
@@ -236,11 +255,22 @@ def build_router(session_factory: sessionmaker, store: ArtifactStore, settings: 
                 raise HTTPException(status_code=409, detail="source URL already exists")
             source.url = body.url.strip()
             source.normalized_url = normalized
+            schedule_changed = True
         if body.name is not None:
             source.name = body.name or default_source_name(source.url)
         if body.enabled is not None:
             source.enabled = body.enabled
-        source.updated_at = utc_now()
+        if body.schedule_enabled is not None:
+            source.schedule_enabled = body.schedule_enabled
+        if body.schedule_interval_minutes is not None:
+            source.schedule_interval_minutes = body.schedule_interval_minutes
+
+        now = utc_now()
+        if not source.schedule_enabled:
+            source.next_run_at = None
+        elif schedule_changed or source.next_run_at is None:
+            source.next_run_at = schedule_next_at(now, source.schedule_interval_minutes)
+        source.updated_at = now
         session.commit()
         return _source_payload(source)
 
@@ -251,29 +281,7 @@ def build_router(session_factory: sessionmaker, store: ArtifactStore, settings: 
             raise HTTPException(status_code=404, detail="source not found")
         if not source.enabled:
             raise HTTPException(status_code=409, detail="source is disabled")
-        baseline = session.scalar(
-            select(Run)
-            .where(
-                Run.source_id == source.id,
-                Run.normalized_url == source.normalized_url,
-                Run.status == "succeeded",
-            )
-            .order_by(desc(Run.finished_at))
-            .limit(1)
-        )
-        run = Run(
-            id=str(uuid4()),
-            source_id=source.id,
-            requested_url=source.url,
-            normalized_url=source.normalized_url,
-            profile_key=source.profile_key,
-            baseline_run_id=baseline.id if baseline else None,
-            status="queued",
-            stage="queued",
-            progress=0,
-            message="等待 Worker 处理",
-        )
-        session.add(run)
+        run = create_queued_run(session, source)
         session.commit()
         session.refresh(run)
         return _run_payload(session, run, store)

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api, type ExportFormat } from "./api";
 import { EXCEPTION_TRADE_HEADERS, extractExceptionTradeTable, isExceptionMonitoringDocument, type ExceptionTradeRow } from "./exceptionTradeModel";
+import { POSITION_LIMIT_HEADERS, extractPositionLimitTable, isPositionLimitDocument, type PositionLimitRow } from "./positionLimitModel";
 import { buildDiffMap, buildQualityMap, cellDisplay, cellRangeContains, cloneDocument, findMergeAt, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, rangesOverlap, scoreLevel, unmergeCellAt, type CellRange } from "./tableModel";
 import type { CompareResult, Document, Run, Scalar, Source, TableSection } from "./types";
 
@@ -159,6 +160,16 @@ function App() {
     }
   }
 
+  async function updateSchedule(source: Source, patch: Partial<Pick<Source, "schedule_enabled" | "schedule_interval_minutes">>) {
+    try {
+      await api.updateSource(source.id, patch);
+      await refreshSources();
+      setNotice({ kind: "success", text: patch.schedule_enabled === false ? "已停用定时抓取" : "定时抓取设置已保存" });
+    } catch (error) {
+      setNotice({ kind: "error", text: (error as Error).message });
+    }
+  }
+
   async function selectImage(candidateId: string) {
     if (!selectedRunId) return;
     try {
@@ -294,7 +305,7 @@ function App() {
               </section>
               <section className="panel">
                 <div className="panel-heading"><div><p className="eyebrow">SOURCE LIST</p><h2>已添加网址</h2></div><button className="quiet" onClick={() => void refreshSources()}>刷新</button></div>
-                <SourceTable sources={sources} onRun={runSource} onToggle={toggleSource} />
+              <SourceTable sources={sources} onRun={runSource} onToggle={toggleSource} onSchedule={updateSchedule} />
               </section>
             </>
           ) : (
@@ -313,9 +324,28 @@ function App() {
   );
 }
 
-function SourceTable({ sources, onRun, onToggle }: { sources: Source[]; onRun: (source: Source) => void; onToggle: (source: Source) => void }) {
+function SourceTable({ sources, onRun, onToggle, onSchedule }: { sources: Source[]; onRun: (source: Source) => void; onToggle: (source: Source) => void; onSchedule: (source: Source, patch: Partial<Pick<Source, "schedule_enabled" | "schedule_interval_minutes">>) => void }) {
   if (!sources.length) return <div className="empty-state">还没有来源，先添加一个网址。</div>;
-  return <div className="table-scroll"><table className="list-table"><thead><tr><th>名称</th><th>网址</th><th>状态</th><th>最近运行</th><th /></tr></thead><tbody>{sources.map((source) => <tr key={source.id}><td className="strong">{source.name}</td><td className="url-cell" title={source.url}>{source.url}</td><td><span className={`status-dot ${source.enabled ? "on" : "off"}`}>{source.enabled ? "启用" : "停用"}</span></td><td>{source.latest_run ? <><span className={`status-badge ${source.latest_run.status}`}>{statusText(source.latest_run.status)}</span><small className="table-time">{formatTime(source.latest_run.finished_at || source.latest_run.created_at)}</small></> : "暂无"}</td><td className="actions"><button className="quiet" disabled={!source.enabled} onClick={() => onRun(source)}>立即运行</button><button className="quiet" onClick={() => onToggle(source)}>{source.enabled ? "停用" : "启用"}</button></td></tr>)}</tbody></table></div>;
+  return <div className="table-scroll"><table className="list-table"><thead><tr><th>名称</th><th>网址</th><th>状态</th><th>定时抓取</th><th>最近运行</th><th /></tr></thead><tbody>{sources.map((source) => <tr key={source.id}><td className="strong">{source.name}</td><td className="url-cell" title={source.url}>{source.url}</td><td><span className={`status-dot ${source.enabled ? "on" : "off"}`}>{source.enabled ? "启用" : "停用"}</span></td><td><ScheduleEditor source={source} onChange={(patch) => onSchedule(source, patch)} /></td><td>{source.latest_run ? <><span className={`status-badge ${source.latest_run.status}`}>{statusText(source.latest_run.status)}</span><small className="table-time">{formatTime(source.latest_run.finished_at || source.latest_run.created_at)}</small></> : "暂无"}</td><td className="actions"><button className="quiet" disabled={!source.enabled} onClick={() => onRun(source)}>立即运行</button><button className="quiet" onClick={() => onToggle(source)}>{source.enabled ? "停用" : "启用"}</button></td></tr>)}</tbody></table></div>;
+}
+
+function ScheduleEditor({ source, onChange }: { source: Source; onChange: (patch: Partial<Pick<Source, "schedule_enabled" | "schedule_interval_minutes">>) => void }) {
+  const [interval, setInterval] = useState(String(source.schedule_interval_minutes || 60));
+
+  useEffect(() => {
+    setInterval(String(source.schedule_interval_minutes || 60));
+  }, [source.schedule_interval_minutes]);
+
+  function saveInterval() {
+    const value = Number.parseInt(interval, 10);
+    if (!Number.isInteger(value) || value < 1 || value > 43_200) {
+      setInterval(String(source.schedule_interval_minutes || 60));
+      return;
+    }
+    if (value !== source.schedule_interval_minutes) onChange({ schedule_interval_minutes: value });
+  }
+
+  return <div className="schedule-editor"><label><input type="checkbox" checked={source.schedule_enabled} onChange={(event) => onChange({ schedule_enabled: event.target.checked })} /> 自动</label><div className="schedule-interval"><input aria-label={`${source.name} 定时间隔（分钟）`} type="number" min="1" max="43200" value={interval} onChange={(event) => setInterval(event.target.value)} onBlur={saveInterval} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} /><span>分钟</span></div><small>{source.schedule_enabled ? `下次 ${formatTime(source.next_run_at)}` : "未启用"}</small></div>;
 }
 
 function RunTable({ runs, selectedRunId, onSelect }: { runs: Run[]; selectedRunId: string | null; onSelect: (id: string) => void }) {
@@ -342,7 +372,7 @@ function SelectedImageInfo({ run }: { run: Run }) {
   const candidate = run.candidates.find((item) => item.selected);
   if (!candidate) return null;
   const dimensions = candidate.width && candidate.height ? `${candidate.width} × ${candidate.height}` : "尺寸未知";
-  return <div className="image-info">原图：{dimensions}{candidate.mime_type && <span> · {candidate.mime_type}</span>}{candidate.sha256 && <span> · SHA-256 {candidate.sha256.slice(0, 16)}…</span>}</div>;
+  return <div className="image-info">原图：{dimensions}{candidate.mime_type && <span> · {candidate.mime_type}</span>}{candidate.sha256 && <span> · SHA-256 {candidate.sha256.slice(0, 16)}…</span>}{run.recognition_skipped && <span> · 本次 SHA 未变化，已跳过识别</span>}</div>;
 }
 
 function OriginalImageViewer({ run }: { run: Run }) {
@@ -357,10 +387,13 @@ function ComparisonPanel({ compare }: { compare: CompareResult | null }) { if (!
 function DocumentTables({ document, compare, selectedRange, onChangeCell, onSelectCell, onMerge, onUnmerge }: { document: Document; compare: CompareResult | null; selectedRange: CellRange | null; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void }) {
   const diffMap = buildDiffMap(compare);
   const qualityMap = buildQualityMap(document);
+  const isPositionLimit = isPositionLimitDocument(document);
+  const positionLimitTable = isPositionLimit ? extractPositionLimitTable(document) : null;
   const isException = isExceptionMonitoringDocument(document);
   const exceptionTable = isException ? extractExceptionTradeTable(document) : null;
   const rawTables = <><ConfidenceGuide />{document.sections.map((section) => <TableSectionView key={section.id} section={section} diffMap={diffMap} qualityMap={qualityMap} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} />)}</>;
-  return <div className="document-tables">{exceptionTable ? <><ExceptionTradeTable table={exceptionTable} />{<details className="raw-document-details"><summary>查看/修订原始识别表格</summary><div className="raw-document-tables">{rawTables}</div></details>}</> : rawTables}{document.footer_notes?.length > 0 && <div className="notes-block"><strong>页脚说明</strong>{document.footer_notes.map((note, index) => <p key={index}>{String(note.text ?? "")}</p>)}</div>}</div>;
+  const specialTable = positionLimitTable ? <><PositionLimitTable table={positionLimitTable} /><details className="raw-document-details"><summary>查看/修订原始识别表格</summary><div className="raw-document-tables">{rawTables}</div></details></> : exceptionTable ? <><ExceptionTradeTable table={exceptionTable} /><details className="raw-document-details"><summary>查看/修订原始识别表格</summary><div className="raw-document-tables">{rawTables}</div></details></> : rawTables;
+  return <div className="document-tables">{specialTable}{document.footer_notes?.length > 0 && <div className="notes-block"><strong>页脚说明</strong>{document.footer_notes.map((note, index) => <p key={index}>{String(note.text ?? "")}</p>)}</div>}</div>;
 }
 
 function formatQuantity(value: number): string {
@@ -383,6 +416,28 @@ function ExceptionTradeTable({ table }: { table: { rows: ExceptionTradeRow[]; un
     <div className="exception-table-note">原图只提供单日最大开仓量，未提供独立预警线；预警值暂按最大开仓量的 80% 计算。中金所同时存在“单一合约/品种合计”及期权口径，详情请展开原始表格核对。</div>
     {table.rows.length ? <div className="table-scroll"><table className="exception-table"><thead><tr>{EXCEPTION_TRADE_HEADERS.map((header) => <th scope="col" key={header}>{header}</th>)}</tr></thead>{exchangeGroups.map((group, groupIndex) => <tbody key={group.exchange} className={groupIndex > 0 ? "exception-exchange-group" : undefined}>{group.rows.map((row, rowIndex) => <tr className={rowIndex === 0 && groupIndex > 0 ? "exception-group-start" : undefined} key={row.id} title={row.sourceText}>{rowIndex === 0 && <td className="exception-exchange-cell" rowSpan={group.rows.length}>{group.exchange}</td>}<td><span className="instrument-name">{row.instrumentName}</span>{row.scope === "contract" && <small className="instrument-scope">指定合约</small>}</td><td><code>{row.instrumentCode}</code></td><td className="quantity-cell">{formatQuantity(row.openTotal)}</td><td className="quantity-cell warning-cell">{formatQuantity(row.openTotalWarning)}</td><td><span className={`instrument-kind ${row.instrumentType === "期权" ? "option" : "future"}`}>{row.instrumentType}</span></td></tr>)}</tbody>)}</table></div> : <div className="exception-empty">未从交易限额单元格中识别到可映射品种，请展开原始识别表格核对。</div>}
     {table.unmappedLimitCells.length > 0 && <div className="exception-unmapped"><strong>有 {table.unmappedLimitCells.length} 个限额单元格未完成静态映射</strong><span>已保留在原始识别表格中，请补充映射后再使用。</span></div>}
+  </section>;
+}
+
+function PositionLimitTable({ table }: { table: { rows: PositionLimitRow[]; unmappedCells: string[] } }) {
+  const groups = table.rows.reduce<Array<{ id: string; rows: PositionLimitRow[] }>>((result, row) => {
+    const group = result.find((item) => item.id === row.groupId);
+    if (group) group.rows.push(row);
+    else result.push({ id: row.groupId, rows: [row] });
+    return result;
+  }, []);
+  const hasFutureRows = table.rows.some((row) => row.type === "期货");
+  const hasOptionRows = table.rows.some((row) => row.type === "期权");
+  const tableTitle = hasFutureRows && hasOptionRows ? "期货/期权限仓" : hasOptionRows ? "期权限仓" : "期货限仓";
+
+  return <section className="position-limit-panel">
+    <div className="position-limit-heading">
+      <div><p className="eyebrow">POSITION LIMITS</p><h3>{tableTitle}</h3><p className="muted">从 OCR 识别结果整理交易所、品种/合约、持仓日期、总持仓量和最大单边持仓规则；品种名称按本地交易代码映射。</p></div>
+      <span className="position-limit-count">{table.rows.length} 条规则</span>
+    </div>
+    <div className="position-limit-note">持仓方向和投保未在图片中单独列出时按“所有”展示；固定值与百分比限仓均保留原表含义。原始识别表格可展开核对 OCR 文本和合并关系。</div>
+    {table.rows.length ? <div className="table-scroll"><table className="position-limit-table"><thead><tr><th className="position-select-header" aria-label="选择"><input type="checkbox" disabled /></th>{POSITION_LIMIT_HEADERS.map((header) => <th scope="col" key={header}>{header}</th>)}</tr></thead>{groups.map((group, groupIndex) => <tbody key={group.id} className={groupIndex > 0 ? "position-limit-group" : undefined}>{group.rows.map((row, rowIndex) => <tr key={row.id} className={rowIndex === 0 && groupIndex > 0 ? "position-group-start" : undefined} title={row.sourceText}><td className="position-select-cell"><input type="checkbox" aria-label={`选择 ${row.exchange} ${row.instrument} ${row.holdingDate}`} /></td>{rowIndex === 0 && <><td className="position-type-cell" rowSpan={group.rows.length}><span className={`position-type ${row.type === "期权" ? "option" : "future"}`}>{row.type}</span></td><td className="position-exchange-cell" rowSpan={group.rows.length}>{row.exchange}</td><td className="position-instrument-cell" rowSpan={group.rows.length}><code>{row.instrument}</code></td><td className="position-meta-cell" rowSpan={group.rows.length}>{row.direction}</td><td className="position-meta-cell" rowSpan={group.rows.length}>{row.hedge}</td></>}<td className="position-date-cell">{row.holdingDate}</td><td className="position-range-cell">{row.totalPosition}</td><td className="position-rule-cell">{row.limitRule}</td></tr>)}</tbody>)}</table></div> : <div className="position-limit-empty">未从识别结果中整理出可用的限仓规则，请展开原始识别表格核对。</div>}
+    {table.unmappedCells.length > 0 && <div className="position-limit-unmapped"><strong>有 {table.unmappedCells.length} 个品种未完成交易代码映射</strong><span>{table.unmappedCells.join("；")}</span></div>}
   </section>;
 }
 

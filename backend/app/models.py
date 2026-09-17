@@ -25,6 +25,9 @@ class Source(Base):
     normalized_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     profile_key: Mapped[str] = mapped_column(String(80), nullable=False, default="yafco_image")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    schedule_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    schedule_interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
@@ -50,6 +53,7 @@ class Run(Base):
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     comparison_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    recognition_skipped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     lease_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

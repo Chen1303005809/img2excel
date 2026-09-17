@@ -52,8 +52,13 @@ class SequenceExtractor:
 
 
 class FakeDownloader:
+    def __init__(self, contents: list[bytes] | None = None):
+        self.contents = contents or [b"fake-image"]
+        self.calls = 0
+
     async def download(self, candidate: ImageCandidateData) -> DownloadedImage:
-        content = f"fake-image-{candidate.ordinal}".encode()
+        content = self.contents[min(self.calls, len(self.contents) - 1)]
+        self.calls += 1
         return DownloadedImage(
             content=content,
             media_type="image/png",
@@ -98,10 +103,10 @@ def _create_source_and_run(session_factory, *, source_id: str | None = None, bas
         return source, run
 
 
-def _runner(db_env, crawler: FakeCrawler, extractor: SequenceExtractor) -> PipelineRunner:
+def _runner(db_env, crawler: FakeCrawler, extractor: SequenceExtractor, downloader: FakeDownloader | None = None) -> PipelineRunner:
     settings, _, session_factory, store = db_env
     runner = PipelineRunner(settings, session_factory, store, crawler, extractor=extractor)
-    runner.downloader = FakeDownloader()
+    runner.downloader = downloader or FakeDownloader()
     return runner
 
 
@@ -110,7 +115,7 @@ async def test_pipeline_persists_original_outputs_and_comparison(db_env):
     candidates = (ImageCandidateData("/source.png", "https://example.com/source.png", 0, "表格", 800, 300),)
     crawler = FakeCrawler(candidates)
     extractor = SequenceExtractor([make_document("100"), make_document("200")])
-    runner = _runner(db_env, crawler, extractor)
+    runner = _runner(db_env, crawler, extractor, FakeDownloader([b"image-v1", b"image-v2"]))
     _, first_run = _create_source_and_run(db_env[2])
     await runner.process(first_run.id)
 
@@ -136,6 +141,29 @@ async def test_pipeline_persists_original_outputs_and_comparison(db_env):
         assert persisted.status == "succeeded"
         assert persisted.comparison_summary["has_baseline"] is True
         assert persisted.comparison_summary["changed_cells"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_skips_ocr_when_image_sha_is_unchanged(db_env):
+    candidates = (ImageCandidateData("/source.png", "https://example.com/source.png", 0, "表格", 800, 300),)
+    crawler = FakeCrawler(candidates)
+    extractor = SequenceExtractor([make_document("100"), make_document("999")])
+    runner = _runner(db_env, crawler, extractor, FakeDownloader([b"stable-image"]))
+
+    _, first_run = _create_source_and_run(db_env[2])
+    await runner.process(first_run.id)
+    _, second_run = _create_source_and_run(db_env[2], source_id=first_run.source_id, baseline_run_id=first_run.id)
+    await runner.process(second_run.id)
+
+    with db_env[2]() as session:
+        persisted = session.get(Run, second_run.id)
+        assert persisted is not None
+        assert persisted.status == "succeeded"
+        assert persisted.recognition_skipped is True
+        assert "跳过识别" in persisted.message
+        candidate = session.query(ImageCandidate).filter_by(run_id=second_run.id, selected=True).one()
+        assert candidate.sha256 == session.query(ImageCandidate).filter_by(run_id=first_run.id, selected=True).one().sha256
+    assert len(extractor.paths) == 1
 
 
 @pytest.mark.asyncio

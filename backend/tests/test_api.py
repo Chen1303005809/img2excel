@@ -93,6 +93,32 @@ def test_source_lifecycle_and_seeded_sources(tmp_path):
         assert queued.json()["baseline_run_id"] is None
 
 
+def test_source_schedule_can_be_configured_with_a_custom_interval(tmp_path):
+    from backend.app.config import Settings
+
+    settings_data = tmp_path / "data"
+    settings = Settings(data_dir=settings_data, database_url=f"sqlite:///{settings_data / 'app.db'}")
+    app = create_app(settings)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/sources",
+            json={"url": "https://example.com/schedule", "schedule_enabled": True, "schedule_interval_minutes": 15},
+        )
+        assert response.status_code == 201
+        source = response.json()
+        assert source["schedule_enabled"] is True
+        assert source["schedule_interval_minutes"] == 15
+        assert source["next_run_at"] is not None
+
+        updated = client.patch(f"/api/sources/{source['id']}", json={"schedule_interval_minutes": 30}).json()
+        assert updated["schedule_interval_minutes"] == 30
+        assert updated["next_run_at"] is not None
+
+        disabled = client.patch(f"/api/sources/{source['id']}", json={"schedule_enabled": False}).json()
+        assert disabled["schedule_enabled"] is False
+        assert disabled["next_run_at"] is None
+
+
 def test_document_revision_preserves_raw_document_and_exports_revision(tmp_path):
     from backend.app.config import Settings
 
