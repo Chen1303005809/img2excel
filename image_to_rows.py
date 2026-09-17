@@ -4,7 +4,8 @@
 The pipeline intentionally keeps OCR and table geometry separate:
 
 * OpenCV finds repeated horizontal/vertical rules and candidate table regions.
-* RapidOCR + ONNX Runtime (CPU) returns text boxes.
+* RapidOCR + ONNX Runtime returns text boxes; device and model location come
+  from environment variables.
 * The geometry layer assigns boxes to cells and infers merged cells from
   partial rules.
 * When a table has few or no rules, OCR row/column clustering is used as a
@@ -20,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any, Iterable
@@ -27,6 +29,67 @@ from typing import Any, Iterable
 import cv2
 import numpy as np
 from rapidocr import RapidOCR
+
+
+OCR_DEVICE_ENV = "IMAGE_TABLE_OCR_DEVICE"
+OCR_MODEL_ROOT_DIR_ENV = "IMAGE_TABLE_OCR_MODEL_ROOT_DIR"
+OCR_CUDA_DEVICE_ID_ENV = "IMAGE_TABLE_OCR_CUDA_DEVICE_ID"
+
+
+def _ocr_device() -> str:
+    """Return the normalized OCR device selected by the environment."""
+    configured = os.getenv(OCR_DEVICE_ENV, "cuda").strip().lower()
+    aliases = {"gpu": "cuda", "cuda": "cuda", "cpu": "cpu"}
+    try:
+        return aliases[configured]
+    except KeyError as error:
+        raise ValueError(
+            f"{OCR_DEVICE_ENV} must be 'cuda' or 'cpu', got {configured!r}"
+        ) from error
+
+
+def _ocr_model_root_dir() -> Path:
+    """Resolve the model cache relative to the process working directory."""
+    configured = os.getenv(OCR_MODEL_ROOT_DIR_ENV, "models").strip()
+    if not configured:
+        raise ValueError(f"{OCR_MODEL_ROOT_DIR_ENV} must not be empty")
+
+    model_root = Path(configured).expanduser()
+    if not model_root.is_absolute():
+        model_root = Path.cwd() / model_root
+    return model_root.resolve()
+
+
+def _ocr_cuda_device_id() -> int:
+    configured = os.getenv(OCR_CUDA_DEVICE_ID_ENV, "0").strip()
+    try:
+        device_id = int(configured)
+    except ValueError as error:
+        raise ValueError(
+            f"{OCR_CUDA_DEVICE_ID_ENV} must be a non-negative integer, got {configured!r}"
+        ) from error
+    if device_id < 0:
+        raise ValueError(
+            f"{OCR_CUDA_DEVICE_ID_ENV} must be a non-negative integer, got {configured!r}"
+        )
+    return device_id
+
+
+def ocr_engine_params() -> dict[str, Any]:
+    """Build RapidOCR overrides from deployment environment variables."""
+    device = _ocr_device()
+    model_root = _ocr_model_root_dir()
+    model_root.mkdir(parents=True, exist_ok=True)
+    return {
+        "Global.model_root_dir": str(model_root),
+        "EngineConfig.onnxruntime.use_cuda": device == "cuda",
+        "EngineConfig.onnxruntime.cuda_ep_cfg.device_id": _ocr_cuda_device_id(),
+    }
+
+
+def create_ocr_engine() -> RapidOCR:
+    """Create the shared OCR engine using the current deployment settings."""
+    return RapidOCR(params=ocr_engine_params())
 
 
 def contiguous_runs(mask: np.ndarray) -> list[tuple[int, int]]:
@@ -1072,7 +1135,7 @@ def extract(input_path: Path, engine: RapidOCR | None = None) -> dict[str, Any]:
         raise SystemExit(f"cannot read image: {input_path}")
     height, width = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    engine = engine or RapidOCR()
+    engine = engine or create_ocr_engine()
 
     bands = detect_colored_bands(image)
     band_labels: list[str] = []

@@ -135,7 +135,7 @@ RapidOCR 官方 README 将其定位为基于 ONNX Runtime、OpenVINO、MNN、Pad
 - 全局有 `use_det`、`use_cls`、`use_rec`，即检测、方向分类、识别三个阶段；
 - 返回结果包括检测框、识别文本和分数；`return_word_box` 可开启词级框；
 - 全局 `max_side_len=2000`；中文检测配置 `limit_side_len=736`、`limit_type=min`，并配置了 PP-OCR 中文模型族；
-- 默认 `use_cuda=false`，ONNX Runtime CPU 是轻量、可本地交付的默认方向。[RapidOCR 配置](https://github.com/RapidAI/RapidOCR/blob/main/python/rapidocr/config.yaml)、[RapidOCR 主流程源码](https://github.com/RapidAI/RapidOCR/blob/main/python/rapidocr/main.py)
+- RapidOCR 上游配置默认 `use_cuda=false`；本项目通过 `IMAGE_TABLE_OCR_DEVICE` 覆盖该值，当前默认使用 CUDA，也可显式切回 CPU。[RapidOCR 配置](https://github.com/RapidAI/RapidOCR/blob/main/python/rapidocr/config.yaml)、[RapidOCR 主流程源码](https://github.com/RapidAI/RapidOCR/blob/main/python/rapidocr/main.py)
 
 RapidOCR 本身的输出是 OCR 几何和文字，不是表格结构。RapidTable README 明确描述了“表格图片 + RapidOCR”经有线/无线表格识别后输出 HTML，并列出 `ppstructure_zh` 等 ONNX Runtime 表格模型；这是一条比直接手写网格重建更完整的 RapidAI 组合路线，但它增加了一个独立的表格包、模型和版本配对约束。[RapidTable README](https://github.com/RapidAI/RapidTable)
 
@@ -143,7 +143,7 @@ RapidOCR 本身的输出是 OCR 几何和文字，不是表格结构。RapidTabl
 
 ONNX Runtime 官方 README 将其定义为跨平台的机器学习推理/训练加速器，负责加载并运行 ONNX 模型，不提供中文字符字典、文本检测模型或表格拓扑。CPU Python 包的官方安装命令是 `pip install onnxruntime`；GPU、DirectML、CUDA/TensorRT 等是不同包或需要匹配驱动/运行库的执行提供程序。[ONNX Runtime README](https://github.com/microsoft/onnxruntime/blob/main/README.md)、[安装文档](https://onnxruntime.ai/docs/install/)
 
-官方 Execution Providers 文档说明：可以按优先级配置执行提供程序，例如 CUDA 不可用时回退 CPU；但组合多个 EP 时，所有依赖库都必须存在。离线部署应固定 ONNX Runtime 版本、模型文件和 EP，默认优先 CPU，以避免 CUDA/TensorRT 驱动边界把“轻量离线”变成机器绑定部署。[Execution Providers](https://onnxruntime.ai/docs/execution-providers/)
+官方 Execution Providers 文档说明：可以按优先级配置执行提供程序，例如 CUDA 不可用时回退 CPU；但组合多个 EP 时，所有依赖库都必须存在。本项目固定 ONNX Runtime 版本，使用 `IMAGE_TABLE_OCR_DEVICE` 选择 CUDA/CPU，并用 `IMAGE_TABLE_OCR_MODEL_ROOT_DIR` 将模型缓存放在工作目录下。[Execution Providers](https://onnxruntime.ai/docs/execution-providers/)
 
 ### 对 908×4141 多分区中文表格的适配判断
 
@@ -181,7 +181,7 @@ ONNX Runtime 主仓库 LICENSE 为 MIT，要求保留版权和许可声明；这
 ### B. 当前样本首选：OpenCV + RapidOCR + 自研网格重建
 
 1. 同样先用 OpenCV 分区；这一步与识别后端解耦。
-2. RapidOCR 采用 ONNX Runtime CPU，预先把模型文件放在本地并关闭首次下载需求。本次样本实测分区识别得到 645 个文字框，整图直接识别得到 585 个文字框。
+2. RapidOCR 采用 ONNX Runtime，设备由 `IMAGE_TABLE_OCR_DEVICE` 决定，模型目录由 `IMAGE_TABLE_OCR_MODEL_ROOT_DIR` 决定。本次样本实测分区识别得到 645 个文字框，整图直接识别得到 585 个文字框。
 3. 用水平/垂直线的局部存在性恢复跨行、跨列单元格；不要把全页统一的行列模板硬套到所有分区。
 4. 把每个单元格值、原图坐标、原始 OCR 分数和必要的二次复识别结果一起输出到 XLSX，低置信度和疑似数字错误留给人工复核。
 5. RapidTable 可作为独立对照分支，但在用户已反馈结构模型丢失内容的情况下，不应绕过坐标证据直接把 HTML 当成真值。

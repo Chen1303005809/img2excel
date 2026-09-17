@@ -10,7 +10,7 @@
 图片
   → OpenCV 自适应二值化和多尺度线段检测
   → 自动发现表格块、彩色标题带和局部网格
-  → RapidOCR + ONNX Runtime CPU 分块识别文字
+  → RapidOCR + ONNX Runtime 分块识别文字（设备由环境变量决定）
   → 根据每个表格自己的 x/y 线恢复单元格和合并关系
   → 无边框或断线时退回 OCR 行列聚类
   → JSON 中间格式
@@ -46,7 +46,7 @@ python -m pip install -r requirements-image2xlsx.txt
 python image2xlsx.py C:\path\input.png C:\path\output.xlsx --json-output C:\path\rows.json
 ```
 
-不需要 Node，也不依赖 Mac 专用能力。`RapidOCR` 的模型随 Python 包安装到运行环境中，部署时应固定依赖版本并把模型包纳入离线安装包。
+不需要 Node，也不依赖 Mac 专用能力。默认请求 CUDA；如果 CUDA provider 不可用，RapidOCR 会回退到 CPU。模型会下载到当前工作目录下的 `models/`；可通过 `IMAGE_TABLE_OCR_DEVICE=cpu` 显式切回 CPU，并通过 `IMAGE_TABLE_OCR_MODEL_ROOT_DIR` 指定模型目录。生产环境需要安装与 CUDA/cuDNN 匹配的 `onnxruntime-gpu`。
 
 ## 集成边界
 

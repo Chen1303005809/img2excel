@@ -1,19 +1,40 @@
 from __future__ import annotations
 
+import os
 import unittest
+from contextlib import chdir
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from openpyxl import load_workbook
 
 from build_xlsx_portable import write_workbook
-from image_to_rows import extract, merge_adjacent_empty_cells, typed_value
+from image_to_rows import extract, merge_adjacent_empty_cells, ocr_engine_params, typed_value
 
 
 ROOT = Path(__file__).parent
 
 
 class ImageToRowsRegressionTests(unittest.TestCase):
+    def test_ocr_device_and_model_directory_are_environment_configurable(self) -> None:
+        with TemporaryDirectory() as directory, chdir(directory), patch.dict(
+            os.environ,
+            {
+                "IMAGE_TABLE_OCR_DEVICE": "cuda",
+                "IMAGE_TABLE_OCR_MODEL_ROOT_DIR": "ocr-models",
+                "IMAGE_TABLE_OCR_CUDA_DEVICE_ID": "2",
+            },
+            clear=False,
+        ):
+            params = ocr_engine_params()
+            expected_model_root = Path.cwd() / "ocr-models"
+            self.assertTrue(expected_model_root.is_dir())
+
+        self.assertTrue(params["EngineConfig.onnxruntime.use_cuda"])
+        self.assertEqual(params["EngineConfig.onnxruntime.cuda_ep_cfg.device_id"], 2)
+        self.assertEqual(params["Global.model_root_dir"], str(expected_model_root))
+
     def test_table4_keeps_all_colored_sections_and_footer_text(self) -> None:
         data = extract(ROOT / "example_pics" / "表4期权限仓20260609.png")
 

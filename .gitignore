@@ -15,6 +15,7 @@ __pycache__
 .venv/
 .crawl4ai/
 .playwright-browsers/
+models/
 
 crawl4ai_outputs
 .env

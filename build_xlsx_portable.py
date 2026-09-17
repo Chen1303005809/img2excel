@@ -185,7 +185,7 @@ def write_workbook(data: dict[str, Any], output_path: Path) -> None:
         ["OCR 平均置信度", metrics.get("ocr_avg_score"), "模型分数，不等同于字符准确率"],
         ["低于 0.75 的文字框", metrics.get("ocr_low_score_count", 0), "仍需人工抽查高分误识别"],
         ["二次修正", len(data.get("corrections", [])), "对疑似低置信度单元格做裁边复识别"],
-        ["识别链路", "OpenCV + RapidOCR + ONNX Runtime CPU", "几何与文字识别解耦"],
+        ["识别链路", "OpenCV + RapidOCR + ONNX Runtime（设备由环境变量决定）", "几何与文字识别解耦"],
         ["表格策略", "；".join(f"{key}: {value}" for key, value in strategy_counts.items()), "规则表优先，无边框时使用 OCR 排版后备"],
         ["彩色标题带", metrics.get("colored_band_count", 0), "优先定位分区、彩色说明框和页首表头；不足时回退到线段检测"],
         ["自动后备分支", "已使用" if metrics.get("fallback_used") else "未使用", "后备分支用于处理无边框或断线表格"],

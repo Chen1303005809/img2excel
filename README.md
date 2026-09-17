@@ -53,6 +53,9 @@ cd frontend && npm run dev
 | `IMAGE_TABLE_WORKER_CONCURRENCY` | `1` | Worker 同时处理的运行数 |
 | `IMAGE_TABLE_CRAWL_CONCURRENCY` | Worker 并发数 | 抓取信号量 |
 | `IMAGE_TABLE_OCR_CONCURRENCY` | `1` | OCR 信号量，默认串行 |
+| `IMAGE_TABLE_OCR_DEVICE` | `cuda` | OCR 设备，可设为 `cuda` 或 `cpu` |
+| `IMAGE_TABLE_OCR_MODEL_ROOT_DIR` | `./models` | RapidOCR 模型目录；相对路径按当前工作目录解析 |
+| `IMAGE_TABLE_OCR_CUDA_DEVICE_ID` | `0` | CUDA GPU 编号 |
 | `IMAGE_TABLE_LEASE_SECONDS` | `900` | Worker 租约超时恢复时间 |
 | `IMAGE_TABLE_ALLOW_PRIVATE_HOSTS` | `false` | 是否允许抓取本机/私有地址 |
 
@@ -63,7 +66,7 @@ cd frontend && npm run dev
 3. Crawl4AI 按 `yafco_image` 页面配置等待 `.ya-con img`，从 `.ya-con img[src]` 提取候选图片。
 4. 0 张图片会失败；1 张自动识别；多张进入候选选择，避免静默选错。
 5. 识别结果保留 `image_to_rows` v2 文档，并封装为 `schema_version=1` 的运行文档；所有识别单元格按原文字符串保存（百分数不会转换成小数），生成表格时会把相邻的空白单元格合并为矩形结构。
-6. 数据面板支持真实 `rowSpan`/`colSpan` 的表格预览、单元格编辑、识别分数颜色分级和显式保存修订；单击起始单元格后按住 Shift 单击结束单元格，可手动合并或取消合并，再导出修订后的 JSON/XLSX。
+6. 数据面板支持真实 `rowSpan`/`colSpan` 的表格预览、单元格编辑、识别分数颜色分级和显式保存修订；运行详情显示各颜色分数的识别框数量，原图按比例完整展开；单击起始单元格后按住 Shift 单击结束单元格，可手动合并或取消合并，再导出修订后的 JSON/XLSX。
 7. 修订写入 `revisions/`，原始识别 JSON/XLSX 永不覆盖。下一次运行默认比较上一条成功运行的原始 OCR 文档。
 
 运行产物结构：

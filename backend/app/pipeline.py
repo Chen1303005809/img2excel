@@ -40,11 +40,10 @@ class LocalImageExtractor:
         self._engine = None
 
     def extract(self, image_path: Path) -> dict[str, Any]:
-        from image_to_rows import extract
-        from rapidocr import RapidOCR
+        from image_to_rows import create_ocr_engine, extract
 
         if self._engine is None:
-            self._engine = RapidOCR()
+            self._engine = create_ocr_engine()
         return extract(image_path, engine=self._engine)
 
 
