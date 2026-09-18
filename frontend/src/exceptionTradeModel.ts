@@ -1,4 +1,4 @@
-import type { Document, Scalar } from "./types";
+import type { Document, Scalar, SourceCellRef } from "./types";
 
 export type InstrumentKind = "期货" | "期权";
 
@@ -20,6 +20,7 @@ export interface ExceptionTradeRow {
   instrumentType: InstrumentKind;
   scope: "product" | "contract";
   sourceText: string;
+  sourceCells: SourceCellRef[];
 }
 
 export interface ExceptionTradeTable {
@@ -263,6 +264,7 @@ function makeRow(
   kind: InstrumentKind,
   scope: "product" | "contract",
   sourceText: string,
+  sourceCells: SourceCellRef[] = [],
 ): ExceptionTradeRow {
   const instrumentName = mappings.map((item) => item.name).join("、");
   const instrumentCode = [...new Set(codes)].join("、");
@@ -277,10 +279,11 @@ function makeRow(
     instrumentType: kind,
     scope,
     sourceText,
+    sourceCells,
   };
 }
 
-function parseLimitClause(clause: string): ExceptionTradeRow[] {
+function parseLimitClause(clause: string, sourceCells: SourceCellRef[] = []): ExceptionTradeRow[] {
   const values = limitValues(clause);
   if (!values.length) return [];
   const mappings = resolveMappings(clause);
@@ -301,14 +304,15 @@ function parseLimitClause(clause: string): ExceptionTradeRow[] {
         kind,
         "product",
         clause,
+        sourceCells,
       ),
     );
-    rows.push(makeRow(mappings, contractCodes, values[values.length - 1], kind, "contract", clause));
+    rows.push(makeRow(mappings, contractCodes, values[values.length - 1], kind, "contract", clause, sourceCells));
     return rows;
   }
 
   if (contractCodes.length) {
-    rows.push(makeRow(mappings, contractCodes, values[values.length - 1], kind, "contract", clause));
+    rows.push(makeRow(mappings, contractCodes, values[values.length - 1], kind, "contract", clause, sourceCells));
     return rows;
   }
 
@@ -320,6 +324,7 @@ function parseLimitClause(clause: string): ExceptionTradeRow[] {
       kind,
       "product",
       clause,
+      sourceCells,
     ),
   );
   return rows;
@@ -354,8 +359,17 @@ function cffexLimits(document: Document): { future: number; option: number } {
 }
 
 function cffexRows(document: Document): ExceptionTradeRow[] {
-  const text = documentRows(document).flat().map(cellText).join(" ");
+  const cells = document.sections.flatMap((section) => section.cells.flatMap((row, rowIndex) => row.map((value, column) => ({
+    value: cellText(value),
+    ref: { sectionId: section.id, row: rowIndex, column },
+  }))));
+  const text = cells.map((cell) => cell.value).join(" ");
   if (!text.includes("股指期货") && !text.includes("股指期权")) return [];
+
+  const cffexSectionIds = new Set(
+    cells.filter((cell) => cell.value.includes("股指期货") || cell.value.includes("股指期权")).map((cell) => cell.ref.sectionId),
+  );
+  const cffexSourceCells = cells.filter((cell) => cffexSectionIds.has(cell.ref.sectionId)).map((cell) => cell.ref);
 
   const { future: futureLimit, option: optionLimit } = cffexLimits(document);
 
@@ -373,6 +387,7 @@ function cffexRows(document: Document): ExceptionTradeRow[] {
         "期货",
         "product",
         "股指期货（沪深300、中证500、中证1000、上证50股指期货）",
+        cffexSourceCells,
       ),
     );
   }
@@ -386,6 +401,7 @@ function cffexRows(document: Document): ExceptionTradeRow[] {
         "期权",
         "product",
         "股指期权（沪深300、中证1000、上证50股指期权）",
+        cffexSourceCells,
       ),
     );
   }
@@ -407,22 +423,38 @@ export function extractExceptionTradeTable(document: Document): ExceptionTradeTa
   const rows: ExceptionTradeRow[] = [];
   const unmappedLimitCells: string[] = [];
 
-  for (const row of documentRows(document)) {
-    for (const value of row) {
-      const sourceText = cellText(value);
-      if (!sourceText.includes("手") || (!sourceText.includes("开仓") && !sourceText.includes("交易限额"))) continue;
-      const clauses = splitLimitClauses(sourceText);
-      for (const clause of clauses) {
-        const parsed = parseLimitClause(clause);
-        if (!parsed.length && limitValues(clause).length) unmappedLimitCells.push(clause);
-        rows.push(...parsed);
+  for (const section of document.sections) {
+    for (let rowIndex = 0; rowIndex < section.cells.length; rowIndex += 1) {
+      const row = section.cells[rowIndex];
+      for (let column = 0; column < row.length; column += 1) {
+        const sourceText = cellText(row[column]);
+        if (!sourceText.includes("手") || (!sourceText.includes("开仓") && !sourceText.includes("交易限额"))) continue;
+        const clauses = splitLimitClauses(sourceText);
+        const sourceCells = [{ sectionId: section.id, row: rowIndex, column }];
+        for (const clause of clauses) {
+          const parsed = parseLimitClause(clause, sourceCells);
+          if (!parsed.length && limitValues(clause).length) unmappedLimitCells.push(clause);
+          rows.push(...parsed);
+        }
       }
     }
   }
 
   rows.push(...cffexRows(document));
-  const uniqueRows = [...new Map(rows.map((row) => [rowKey(row), row])).values()];
-  return { rows: uniqueRows, unmappedLimitCells: [...new Set(unmappedLimitCells)] };
+  const uniqueRows = new Map<string, ExceptionTradeRow>();
+  for (const row of rows) {
+    const key = rowKey(row);
+    const existing = uniqueRows.get(key);
+    if (existing) {
+      existing.sourceCells = [...new Map([...existing.sourceCells, ...row.sourceCells].map((cell) => [
+        cell.sectionId + ":" + cell.row + ":" + cell.column,
+        cell,
+      ])).values()];
+    } else {
+      uniqueRows.set(key, row);
+    }
+  }
+  return { rows: [...uniqueRows.values()], unmappedLimitCells: [...new Set(unmappedLimitCells)] };
 }
 
 export function extractExceptionTradeRows(document: Document): ExceptionTradeRow[] {

@@ -102,6 +102,12 @@ export interface TableSection {
   [key: string]: unknown;
 }
 
+export interface SourceCellRef {
+  sectionId: string;
+  row: number;
+  column: number;
+}
+
 export interface Document {
   version: number;
   source: Record<string, unknown>;

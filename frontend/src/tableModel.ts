@@ -1,9 +1,18 @@
-import type { CompareResult, Document, MergedCell, Scalar, TableSection } from "./types";
+import type { CellChange, CompareResult, Document, MergedCell, Scalar, SourceCellRef, TableSection } from "./types";
 
 export type MergeStart = { rowSpan: number; colSpan: number; score: number | null };
 export type CellBounds = { r0: number; r1: number; c0: number; c1: number };
 export type CellRange = CellBounds & { sectionId: string };
 export type ScoreLevel = "high" | "medium" | "low" | "unknown";
+export type DiffKind = CellChange["kind"];
+export interface EntityDiffChange {
+  sectionId: string;
+  change: CellChange;
+}
+export interface EntityDiff {
+  kind: DiffKind;
+  changes: EntityDiffChange[];
+}
 
 export function cloneDocument(document: Document): Document {
   return structuredClone(document);
@@ -105,6 +114,27 @@ export function buildDiffMap(compare: CompareResult | null): Map<string, string>
     }
   }
   return diffMap;
+}
+
+const diffPriority: Record<DiffKind, number> = { removed: 1, added: 2, changed: 3 };
+
+export function findEntityDiff(compare: CompareResult | null, sourceCells: SourceCellRef[] | undefined): EntityDiff | null {
+  if (!compare?.has_baseline || !sourceCells?.length) return null;
+  const sourceKeys = new Set(sourceCells.map((cell) => cell.sectionId + ":" + cell.row + ":" + cell.column));
+  const changes: EntityDiffChange[] = [];
+  for (const section of compare.sections) {
+    if (!section.section_id) continue;
+    for (const change of section.changes) {
+      const key = section.section_id + ":" + (change.row - 1) + ":" + (change.column - 1);
+      if (sourceKeys.has(key)) changes.push({ sectionId: section.section_id, change });
+    }
+  }
+  if (!changes.length) return null;
+  const kind = changes.reduce<DiffKind>(
+    (current, item) => (diffPriority[item.change.kind] > diffPriority[current] ? item.change.kind : current),
+    changes[0].change.kind,
+  );
+  return { kind, changes };
 }
 
 export function cellDisplay(value: Scalar): string {

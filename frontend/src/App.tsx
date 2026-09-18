@@ -2,10 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { api, type ExportFormat } from "./api";
 import { EXCEPTION_TRADE_HEADERS, extractExceptionTradeTable, isExceptionMonitoringDocument, type ExceptionTradeRow } from "./exceptionTradeModel";
 import { POSITION_LIMIT_HEADERS, extractPositionLimitTable, isPositionLimitDocument, type PositionLimitRow } from "./positionLimitModel";
-import { buildDiffMap, buildQualityMap, cellDisplay, cellRangeContains, cloneDocument, findMergeAt, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, rangesOverlap, scoreLevel, unmergeCellAt, type CellRange } from "./tableModel";
+import { buildDiffMap, buildQualityMap, cellDisplay, cellRangeContains, cloneDocument, findEntityDiff, findMergeAt, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, rangesOverlap, scoreLevel, unmergeCellAt, type CellRange, type EntityDiff } from "./tableModel";
 import type { CompareResult, Document, Run, Scalar, Source, TableSection } from "./types";
 
 type View = "sources" | "runs";
+type TablePresentation = "ocr" | "entity";
 type Notice = { kind: "error" | "success"; text: string } | null;
 type ConfidenceCounts = { high: number; medium: number; low: number; unknown: number };
 type DocumentStats = { sections: number; cells: number; confidence: ConfidenceCounts };
@@ -55,6 +56,42 @@ function comparisonCount(summary: Run["comparison_summary"]): number {
   return summary.changed_cells + summary.added_cells + summary.removed_cells + summary.added_sections + summary.removed_sections + summary.merge_changes + summary.dimension_changes;
 }
 
+function diffLabel(kind: EntityDiff["kind"]): string {
+  return kind === "changed" ? "修改" : kind === "added" ? "新增" : "删除";
+}
+
+function entityDiffTitle(diff: EntityDiff | null): string | undefined {
+  if (!diff) return undefined;
+  const details = diff.changes.map(({ sectionId, change }) => {
+    const before = cellDisplay(change.before);
+    const after = cellDisplay(change.after);
+    const value = change.kind === "changed"
+      ? before + " → " + after
+      : change.kind === "added"
+        ? "新增「" + after + "」"
+        : "删除「" + before + "」";
+    return diffLabel(change.kind) + "（" + sectionId + " 第" + change.row + "行第" + change.column + "列）：" + value;
+  });
+  return details.join("；");
+}
+
+function EntityDiffMarker({ diff }: { diff: EntityDiff | null }) {
+  if (!diff) return null;
+  return <span className={"entity-diff-marker " + diff.kind}>{diffLabel(diff.kind)}</span>;
+}
+
+function EntityDiffSummary({ compare }: { compare: CompareResult | null }) {
+  if (!compare || !compare.has_baseline) {
+    return <div className="entity-diff-summary no-baseline"><strong>暂无历史基线</strong><span>这是该网址第一次成功抓取，下一次运行后会显示实体表差异。</span></div>;
+  }
+  const { summary } = compare;
+  return <div className={"entity-diff-summary " + (compare.has_changes ? "has-changes" : "no-changes")}>
+    <div className="entity-diff-summary-main"><strong>{compare.has_changes ? "相对上次抓取有变化" : "相对上次抓取无变化"}</strong><span>基线运行于 {formatTime(compare.baseline?.finished_at)}</span></div>
+    <div className="entity-diff-counts"><span className="changed"><strong>{summary.changed_cells}</strong> 修改</span><span className="added"><strong>{summary.added_cells}</strong> 新增</span><span className="removed"><strong>{summary.removed_cells}</strong> 删除</span><span><strong>{summary.merge_changes + summary.dimension_changes}</strong> 结构</span></div>
+    {compare.has_changes && <div className="entity-diff-legend"><span><i className="entity-diff-swatch changed" />修改</span><span><i className="entity-diff-swatch added" />新增</span><span><i className="entity-diff-swatch removed" />删除</span>{summary.removed_cells > 0 && <small>删除内容不一定生成当前实体行，必要时可展开原始识别表核对。</small>}</div>}
+  </div>;
+}
+
 function documentStats(document: Document | null): DocumentStats {
   if (!document) return { sections: 0, cells: 0, confidence: { high: 0, medium: 0, low: 0, unknown: 0 } };
   const confidence: ConfidenceCounts = { high: 0, medium: 0, low: 0, unknown: 0 };
@@ -88,12 +125,14 @@ function App() {
   const [sourceFilter, setSourceFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [selectedRange, setSelectedRange] = useState<CellRange | null>(null);
+  const [tablePresentation, setTablePresentation] = useState<TablePresentation>("ocr");
 
   const refreshSources = useCallback(async () => setSources(await api.sources()), []);
   const refreshRuns = useCallback(async () => setRuns(await api.runs(sourceFilter || undefined, statusFilter || undefined)), [sourceFilter, statusFilter]);
 
   const loadRun = useCallback(async (runId: string) => {
     setSelectedRange(null);
+    setTablePresentation("ocr");
     const run = await api.run(runId);
     setSelectedRun(run);
     setSelectedRunId(runId);
@@ -317,7 +356,7 @@ function App() {
         </section>
 
         <aside className="detail-column">
-          <RunDetail run={selectedRun} document={document} compare={compare} stats={stats} dirty={isDirty} selectedRange={selectedRange} onSelectImage={selectImage} onChangeCell={updateCell} onSelectCell={selectCell} onMerge={mergeSelectedCells} onUnmerge={unmergeSelectedCell} onSave={saveRevision} onExport={exportRun} />
+          <RunDetail run={selectedRun} document={document} compare={compare} stats={stats} dirty={isDirty} selectedRange={selectedRange} tablePresentation={tablePresentation} onTablePresentationChange={setTablePresentation} onSelectImage={selectImage} onChangeCell={updateCell} onSelectCell={selectCell} onMerge={mergeSelectedCells} onUnmerge={unmergeSelectedCell} onSave={saveRevision} onExport={exportRun} />
         </aside>
       </main>
     </div>
@@ -353,14 +392,16 @@ function RunTable({ runs, selectedRunId, onSelect }: { runs: Run[]; selectedRunI
   return <div className="table-scroll"><table className="list-table"><thead><tr><th>状态</th><th>网址</th><th>进度</th><th>创建时间</th><th>变化</th></tr></thead><tbody>{runs.map((run) => <tr className={run.id === selectedRunId ? "selected-row" : ""} key={run.id} onClick={() => onSelect(run.id)}><td><span className={`status-badge ${run.status}`}>{statusText(run.status)}</span></td><td className="url-cell" title={run.requested_url}>{run.requested_url}</td><td><div className="progress-cell"><div className="progress-track"><span style={{ width: `${run.progress}%` }} /></div><small>{run.progress}%</small></div></td><td>{formatTime(run.created_at)}</td><td>{run.comparison_summary?.has_baseline ? (run.comparison_summary.has_changes ? `${comparisonCount(run.comparison_summary)} 项` : "无变化") : "首次"}</td></tr>)}</tbody></table></div>;
 }
 
-function RunDetail({ run, document, compare, stats, dirty, selectedRange, onSelectImage, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: DocumentStats; dirty: boolean; selectedRange: CellRange | null; onSelectImage: (candidateId: string) => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: (format: ExportFormat) => void }) {
+function RunDetail({ run, document, compare, stats, dirty, selectedRange, tablePresentation, onTablePresentationChange, onSelectImage, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: DocumentStats; dirty: boolean; selectedRange: CellRange | null; tablePresentation: TablePresentation; onTablePresentationChange: (presentation: TablePresentation) => void; onSelectImage: (candidateId: string) => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: (format: ExportFormat) => void }) {
   if (!run) return <section className="panel detail-empty"><div className="empty-illustration">↗</div><h2>选择一次运行</h2><p>从来源页或运行历史中选择记录，这里会显示任务进度、数据表和历史差异。</p></section>;
+  const supportsEntityPresentation = Boolean(document && (isPositionLimitDocument(document) || isExceptionMonitoringDocument(document)));
+  const showingEntityPresentation = tablePresentation === "entity" && supportsEntityPresentation;
   return <>
     <section className="panel run-card"><div className="run-card-top"><div><p className="eyebrow">RUN DETAIL</p><h2>{run.status === "succeeded" ? (document?.title || "识别结果") : statusText(run.status)}</h2><p className="muted">{formatTime(run.created_at)} · {run.requested_url}</p></div><span className={`status-badge large ${run.status}`}>{statusText(run.status)}</span></div><div className="progress-track large"><span style={{ width: `${run.progress}%` }} /></div><div className="run-message">{run.message}{run.error_message && <span className="error-text">：{run.error_message}</span>}</div>{run.status === "succeeded" && <><div className="stat-row"><Stat label="分区" value={stats.sections} /><Stat label="非空单元格" value={stats.cells} /></div><div className="stat-row confidence-stats" aria-label="不同颜色的识别分数数量"><Stat tone="high" label="高分框" value={stats.confidence.high} /><Stat tone="medium" label="中分框" value={stats.confidence.medium} /><Stat tone="low" label="低分框" value={stats.confidence.low} /><Stat tone="unknown" label="未提供" value={stats.confidence.unknown} /></div></>}{run.status === "succeeded" && <SelectedImageInfo run={run} />}</section>
     {run.status === "awaiting_image_selection" && <CandidatePicker candidates={run.candidates} onSelect={onSelectImage} />}
     {run.status === "succeeded" && document && <>
-      <ComparisonPanel compare={compare} />
-      <section className="panel data-panel"><div className="panel-heading"><div><p className="eyebrow">DATA PANEL</p><h2>识别数据 {dirty && <span className="unsaved-badge">有未保存修改</span>}</h2><p className="muted">可修改单元格值。合并单元格：先单击起始单元格，再按 Shift 单击结束单元格，然后点击“合并选区”。保存修订后再导出，历史原稿保持不变。</p></div><div className="button-row"><button className={dirty ? "primary" : "quiet"} onClick={onSave}>保存修订</button><button className="primary" onClick={() => void onExport("json")}>导出 JSON</button><button className="primary" onClick={() => void onExport("xlsx")}>导出 XLSX</button></div></div><div className="data-workspace"><OriginalImageViewer run={run} /><DocumentTables document={document} compare={compare} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} /></div></section>
+      {(!showingEntityPresentation || !supportsEntityPresentation) && <ComparisonPanel compare={compare} />}
+      <section className={`panel data-panel ${showingEntityPresentation ? "entity-data-panel" : ""}`}><div className="panel-heading"><div><p className="eyebrow">DATA PANEL</p><h2>{showingEntityPresentation ? "实体整理表" : "OCR 识别结果"} {dirty && <span className="unsaved-badge">有未保存修改</span>}</h2><p className="muted">{showingEntityPresentation ? "当前展示由 OCR 结果整理出的业务实体表；如需修订识别文本，请切回 OCR 结果。" : "默认展示 OCR 原始识别结果，可修改单元格值并核对合并关系。整理为实体表后，原始 OCR 结果仍可切回查看。"}</p></div><div className="button-row">{supportsEntityPresentation && <button type="button" className={showingEntityPresentation ? "quiet" : "primary"} onClick={() => onTablePresentationChange(showingEntityPresentation ? "ocr" : "entity")}>{showingEntityPresentation ? "查看 OCR 结果" : "整理为实体表"}</button>}<button type="button" className={dirty ? "primary" : "quiet"} onClick={onSave}>保存修订</button><button type="button" className="primary" onClick={() => void onExport("json")}>导出 JSON</button><button type="button" className="primary" onClick={() => void onExport("xlsx")}>导出 XLSX</button></div></div><div className="data-workspace"><OriginalImageViewer run={run} /><div className={`document-results-scroll ${showingEntityPresentation ? "entity-results-scroll" : ""}`}><DocumentTables tablePresentation={showingEntityPresentation ? "entity" : "ocr"} document={document} compare={compare} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} /></div></div></section>
       <Artifacts run={run} />
     </>}
   </>;
@@ -384,23 +425,24 @@ function CandidatePicker({ candidates, onSelect }: { candidates: Run["candidates
 
 function ComparisonPanel({ compare }: { compare: CompareResult | null }) { if (!compare || !compare.has_baseline) return <section className="panel comparison-panel"><div><p className="eyebrow">COMPARISON</p><h2>暂无历史基线</h2><p className="muted">这是该网址第一次成功识别，下一次运行后会显示差异。</p></div></section>; const { summary } = compare; return <section className={`panel comparison-panel ${compare.has_changes ? "has-changes" : "no-changes"}`}><div><p className="eyebrow">COMPARISON</p><h2>{compare.has_changes ? "发现历史变化" : "与上次相同"}</h2><p className="muted">基线运行于 {formatTime(compare.baseline?.finished_at)}。</p></div><div className="change-summary"><span><strong>{summary.changed_cells}</strong> 修改</span><span><strong>{summary.added_cells}</strong> 新增</span><span><strong>{summary.removed_cells}</strong> 删除</span><span><strong>{summary.merge_changes + summary.dimension_changes}</strong> 结构</span></div>{compare.has_changes && <div className="removed-list">{compare.sections.flatMap((section) => section.changes.filter((change) => change.kind === "removed").map((change) => <span key={`${section.section_id ?? section.baseline_section_id}-${change.row}-${change.column}`}>{section.label || section.section_id || section.baseline_section_id} · 第 {change.row} 行第 {change.column} 列：{cellDisplay(change.before)}</span>))}</div>}</section>; }
 
-function DocumentTables({ document, compare, selectedRange, onChangeCell, onSelectCell, onMerge, onUnmerge }: { document: Document; compare: CompareResult | null; selectedRange: CellRange | null; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void }) {
-  const diffMap = buildDiffMap(compare);
+function DocumentTables({ tablePresentation, document, compare, selectedRange, onChangeCell, onSelectCell, onMerge, onUnmerge }: { tablePresentation: TablePresentation; document: Document; compare: CompareResult | null; selectedRange: CellRange | null; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void }) {
+  const diffMap = tablePresentation === "ocr" ? buildDiffMap(compare) : new Map<string, string>();
   const qualityMap = buildQualityMap(document);
   const isPositionLimit = isPositionLimitDocument(document);
   const positionLimitTable = isPositionLimit ? extractPositionLimitTable(document) : null;
   const isException = isExceptionMonitoringDocument(document);
   const exceptionTable = isException ? extractExceptionTradeTable(document) : null;
   const rawTables = <><ConfidenceGuide />{document.sections.map((section) => <TableSectionView key={section.id} section={section} diffMap={diffMap} qualityMap={qualityMap} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} />)}</>;
-  const specialTable = positionLimitTable ? <><PositionLimitTable table={positionLimitTable} /><details className="raw-document-details"><summary>查看/修订原始识别表格</summary><div className="raw-document-tables">{rawTables}</div></details></> : exceptionTable ? <><ExceptionTradeTable table={exceptionTable} /><details className="raw-document-details"><summary>查看/修订原始识别表格</summary><div className="raw-document-tables">{rawTables}</div></details></> : rawTables;
-  return <div className="document-tables">{specialTable}{document.footer_notes?.length > 0 && <div className="notes-block"><strong>页脚说明</strong>{document.footer_notes.map((note, index) => <p key={index}>{String(note.text ?? "")}</p>)}</div>}</div>;
+  const entityTable = positionLimitTable ? <><PositionLimitTable table={positionLimitTable} compare={compare} /><details className="raw-document-details"><summary>查看/修订原始识别表格</summary><div className="raw-document-tables">{rawTables}</div></details></> : exceptionTable ? <><ExceptionTradeTable table={exceptionTable} compare={compare} /><details className="raw-document-details"><summary>查看/修订原始识别表格</summary><div className="raw-document-tables">{rawTables}</div></details></> : rawTables;
+  const displayedTable = tablePresentation === "entity" && (positionLimitTable || exceptionTable) ? entityTable : rawTables;
+  return <div className="document-tables">{displayedTable}{document.footer_notes?.length > 0 && <div className="notes-block"><strong>页脚说明</strong>{document.footer_notes.map((note, index) => <p key={index}>{String(note.text ?? "")}</p>)}</div>}</div>;
 }
 
 function formatQuantity(value: number): string {
   return value.toLocaleString("zh-CN");
 }
 
-function ExceptionTradeTable({ table }: { table: { rows: ExceptionTradeRow[]; unmappedLimitCells: string[] } }) {
+function ExceptionTradeTable({ table, compare }: { table: { rows: ExceptionTradeRow[]; unmappedLimitCells: string[] }; compare: CompareResult | null }) {
   const exchangeGroups = table.rows.reduce<Array<{ exchange: string; rows: ExceptionTradeRow[] }>>((groups, row) => {
     const group = groups.find((item) => item.exchange === row.exchange);
     if (group) group.rows.push(row);
@@ -414,12 +456,17 @@ function ExceptionTradeTable({ table }: { table: { rows: ExceptionTradeRow[]; un
       <span className="exception-row-count">{table.rows.length} 条限制</span>
     </div>
     <div className="exception-table-note">原图只提供单日最大开仓量，未提供独立预警线；预警值暂按最大开仓量的 80% 计算。中金所同时存在“单一合约/品种合计”及期权口径，详情请展开原始表格核对。</div>
-    {table.rows.length ? <div className="table-scroll"><table className="exception-table"><thead><tr>{EXCEPTION_TRADE_HEADERS.map((header) => <th scope="col" key={header}>{header}</th>)}</tr></thead>{exchangeGroups.map((group, groupIndex) => <tbody key={group.exchange} className={groupIndex > 0 ? "exception-exchange-group" : undefined}>{group.rows.map((row, rowIndex) => <tr className={rowIndex === 0 && groupIndex > 0 ? "exception-group-start" : undefined} key={row.id} title={row.sourceText}>{rowIndex === 0 && <td className="exception-exchange-cell" rowSpan={group.rows.length}>{group.exchange}</td>}<td><span className="instrument-name">{row.instrumentName}</span>{row.scope === "contract" && <small className="instrument-scope">指定合约</small>}</td><td><code>{row.instrumentCode}</code></td><td className="quantity-cell">{formatQuantity(row.openTotal)}</td><td className="quantity-cell warning-cell">{formatQuantity(row.openTotalWarning)}</td><td><span className={`instrument-kind ${row.instrumentType === "期权" ? "option" : "future"}`}>{row.instrumentType}</span></td></tr>)}</tbody>)}</table></div> : <div className="exception-empty">未从交易限额单元格中识别到可映射品种，请展开原始识别表格核对。</div>}
+    <EntityDiffSummary compare={compare} />
+    {table.rows.length ? <div className="table-scroll"><table className="exception-table"><thead><tr>{EXCEPTION_TRADE_HEADERS.map((header) => <th scope="col" key={header}>{header}</th>)}</tr></thead>{exchangeGroups.map((group, groupIndex) => <tbody key={group.exchange} className={groupIndex > 0 ? "exception-exchange-group" : undefined}>{group.rows.map((row, rowIndex) => {
+      const diff = findEntityDiff(compare, row.sourceCells);
+      const rowClassName = [rowIndex === 0 && groupIndex > 0 ? "exception-group-start" : "", diff ? "entity-diff-" + diff.kind : ""].filter(Boolean).join(" ");
+      return <tr className={rowClassName} key={row.id} title={entityDiffTitle(diff) || row.sourceText}>{rowIndex === 0 && <td className="exception-exchange-cell" rowSpan={group.rows.length}>{group.exchange}</td>}<td><span className="instrument-name">{row.instrumentName}</span><EntityDiffMarker diff={diff} />{row.scope === "contract" && <small className="instrument-scope">指定合约</small>}</td><td><code>{row.instrumentCode}</code></td><td className="quantity-cell">{formatQuantity(row.openTotal)}</td><td className="quantity-cell warning-cell">{formatQuantity(row.openTotalWarning)}</td><td><span className={"instrument-kind " + (row.instrumentType === "期权" ? "option" : "future")}>{row.instrumentType}</span></td></tr>;
+    })}</tbody>)}</table></div> : <div className="exception-empty">未从交易限额单元格中识别到可映射品种，请展开原始表格核对。</div>}
     {table.unmappedLimitCells.length > 0 && <div className="exception-unmapped"><strong>有 {table.unmappedLimitCells.length} 个限额单元格未完成静态映射</strong><span>已保留在原始识别表格中，请补充映射后再使用。</span></div>}
   </section>;
 }
 
-function PositionLimitTable({ table }: { table: { rows: PositionLimitRow[]; unmappedCells: string[] } }) {
+function PositionLimitTable({ table, compare }: { table: { rows: PositionLimitRow[]; unmappedCells: string[] }; compare: CompareResult | null }) {
   const groups = table.rows.reduce<Array<{ id: string; rows: PositionLimitRow[] }>>((result, row) => {
     const group = result.find((item) => item.id === row.groupId);
     if (group) group.rows.push(row);
@@ -436,7 +483,12 @@ function PositionLimitTable({ table }: { table: { rows: PositionLimitRow[]; unma
       <span className="position-limit-count">{table.rows.length} 条规则</span>
     </div>
     <div className="position-limit-note">持仓方向和投保未在图片中单独列出时按“所有”展示；固定值与百分比限仓均保留原表含义。原始识别表格可展开核对 OCR 文本和合并关系。</div>
-    {table.rows.length ? <div className="table-scroll"><table className="position-limit-table"><thead><tr><th className="position-select-header" aria-label="选择"><input type="checkbox" disabled /></th>{POSITION_LIMIT_HEADERS.map((header) => <th scope="col" key={header}>{header}</th>)}</tr></thead>{groups.map((group, groupIndex) => <tbody key={group.id} className={groupIndex > 0 ? "position-limit-group" : undefined}>{group.rows.map((row, rowIndex) => <tr key={row.id} className={rowIndex === 0 && groupIndex > 0 ? "position-group-start" : undefined} title={row.sourceText}><td className="position-select-cell"><input type="checkbox" aria-label={`选择 ${row.exchange} ${row.instrument} ${row.holdingDate}`} /></td>{rowIndex === 0 && <><td className="position-type-cell" rowSpan={group.rows.length}><span className={`position-type ${row.type === "期权" ? "option" : "future"}`}>{row.type}</span></td><td className="position-exchange-cell" rowSpan={group.rows.length}>{row.exchange}</td><td className="position-instrument-cell" rowSpan={group.rows.length}><code>{row.instrument}</code></td><td className="position-meta-cell" rowSpan={group.rows.length}>{row.direction}</td><td className="position-meta-cell" rowSpan={group.rows.length}>{row.hedge}</td></>}<td className="position-date-cell">{row.holdingDate}</td><td className="position-range-cell">{row.totalPosition}</td><td className="position-rule-cell">{row.limitRule}</td></tr>)}</tbody>)}</table></div> : <div className="position-limit-empty">未从识别结果中整理出可用的限仓规则，请展开原始识别表格核对。</div>}
+    <EntityDiffSummary compare={compare} />
+    {table.rows.length ? <div className="table-scroll"><table className="position-limit-table"><thead><tr>{POSITION_LIMIT_HEADERS.map((header) => <th scope="col" key={header}>{header}</th>)}</tr></thead>{groups.map((group, groupIndex) => <tbody key={group.id} className={groupIndex > 0 ? "position-limit-group" : undefined}>{group.rows.map((row, rowIndex) => {
+      const diff = findEntityDiff(compare, row.sourceCells);
+      const rowClassName = [rowIndex === 0 && groupIndex > 0 ? "position-group-start" : "", diff ? "entity-diff-" + diff.kind : ""].filter(Boolean).join(" ");
+      return <tr key={row.id} className={rowClassName} title={entityDiffTitle(diff) || row.sourceText}>{rowIndex === 0 && <><td className="position-type-cell" rowSpan={group.rows.length}><span className={"position-type " + (row.type === "期权" ? "option" : "future")}>{row.type}</span></td><td className="position-exchange-cell" rowSpan={group.rows.length}>{row.exchange}</td><td className="position-instrument-cell" rowSpan={group.rows.length}><code>{row.instrument}</code></td><td className="position-meta-cell" rowSpan={group.rows.length}>{row.direction}</td><td className="position-meta-cell" rowSpan={group.rows.length}>{row.hedge}</td></>}<td className="position-date-cell">{row.holdingDate}</td><td className="position-range-cell">{row.totalPosition}</td><td className="position-rule-cell"><span>{row.limitRule}</span><EntityDiffMarker diff={diff} /></td></tr>;
+    })}</tbody>)}</table></div> : <div className="position-limit-empty">未从识别结果中整理出可用的限仓规则，请展开原始识别表格核对。</div>}
     {table.unmappedCells.length > 0 && <div className="position-limit-unmapped"><strong>有 {table.unmappedCells.length} 个品种未完成交易代码映射</strong><span>{table.unmappedCells.join("；")}</span></div>}
   </section>;
 }

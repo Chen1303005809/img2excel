@@ -1,5 +1,5 @@
 import { INSTRUMENT_MAPPINGS, type InstrumentMapping } from "./exceptionTradeModel";
-import type { Document, Scalar, TableSection } from "./types";
+import type { Document, Scalar, SourceCellRef, TableSection } from "./types";
 
 export type PositionLimitInstrumentType = "期货" | "期权";
 
@@ -15,6 +15,7 @@ export interface PositionLimitRow {
   limitRule: string;
   sourceText: string;
   sourceSectionId: string;
+  sourceCells: SourceCellRef[];
   groupId: string;
 }
 
@@ -83,12 +84,14 @@ interface PositionRange {
 interface ProductGroup {
   name: string;
   rows: string[][];
+  rowIndexes: number[];
   startRow: number;
 }
 
 interface LimitBlock {
   section: TableSection;
   rows: string[][];
+  headerRow: number;
   startRow: number;
   endRow: number;
   dateGroups: DateGroup[];
@@ -234,6 +237,7 @@ function findDateHeaders(section: TableSection, rows: string[][]): LimitBlock[] 
     blocks.push({
       section,
       rows,
+      headerRow: headerIndex,
       startRow: dataStart,
       endRow,
       dateGroups,
@@ -383,11 +387,12 @@ function productGroups(block: LimitBlock): ProductGroup[] {
     const product = displayText(row[0] ?? "");
     if (product && !isCommentText(product) && !isPositionLimitHeaderText(product)) {
       if (current) groups.push(current);
-      current = { name: product, rows: [row], startRow: rowIndex };
+      current = { name: product, rows: [row], rowIndexes: [rowIndex], startRow: rowIndex };
       continue;
     }
     if (!current || product || !row.some(isLimitValue)) continue;
     current.rows.push(row);
+    current.rowIndexes.push(rowIndex);
   }
   if (current) groups.push(current);
   return groups;
@@ -401,6 +406,20 @@ function groupSourceText(group: ProductGroup): string {
     .join("；");
 }
 
+function uniqueSourceCells(cells: SourceCellRef[]): SourceCellRef[] {
+  return [...new Map(cells.map((cell) => [cell.sectionId + ":" + cell.row + ":" + cell.column, cell])).values()];
+}
+
+function positionRowSourceCells(block: LimitBlock, group: ProductGroup, date: DateGroup, rowIndexes = group.rowIndexes): SourceCellRef[] {
+  const cells = rowIndexes.flatMap((row) =>
+    block.rows[row].map((_, column) => ({ sectionId: block.section.id, row, column })),
+  );
+  for (let column = date.c0; column <= date.c1; column += 1) {
+    cells.push({ sectionId: block.section.id, row: block.headerRow, column });
+  }
+  return uniqueSourceCells(cells);
+}
+
 function makePositionRow(
   block: LimitBlock,
   group: ProductGroup,
@@ -412,6 +431,7 @@ function makePositionRow(
   limitRule: string,
   dateIndex: number,
   ruleIndex: number,
+  sourceCells = positionRowSourceCells(block, group, date),
 ): PositionLimitRow {
   const groupId = `${block.section.id}:${group.startRow}:${instrumentTypeValue}:${instrument}`;
   return {
@@ -426,6 +446,7 @@ function makePositionRow(
     limitRule,
     sourceText: groupSourceText(group),
     sourceSectionId: block.section.id,
+    sourceCells,
     groupId,
   };
 }
@@ -478,6 +499,7 @@ function simplePositionRows(
       limitRule,
       sourceText: rows[rowIndex].filter(Boolean).map(displayText).join("；"),
       sourceSectionId: section.id,
+      sourceCells: rows[rowIndex].map((_, column) => ({ sectionId: section.id, row: rowIndex, column })),
       groupId,
     });
   }
@@ -507,27 +529,35 @@ function rowsForProduct(
   for (let dateIndex = 0; dateIndex < block.dateGroups.length; dateIndex += 1) {
     const date = block.dateGroups[dateIndex];
     if (thresholdRows.length && dateIndex === 0) {
-      thresholdRows.forEach(({ row, range }, ruleIndex) => {
+      thresholdRows.forEach(({ row, index, range }, ruleIndex) => {
         const limitRule = formatLimitRule(valueForDate(row, date, block.scaleColumn));
         if (!limitRule) return;
-        result.push(makePositionRow(block, group, type, exchange, instrument, date, formatPositionRange(range), limitRule, dateIndex, ruleIndex));
+        result.push(makePositionRow(block, group, type, exchange, instrument, date, formatPositionRange(range), limitRule, dateIndex, ruleIndex, positionRowSourceCells(block, group, date, [group.rowIndexes[0], group.rowIndexes[index]])));
       });
       continue;
     }
 
-    const rawLimit = group.rows.map((row) => valueForDate(row, date, block.scaleColumn)).find((value) => formatLimitRule(value));
+    const rawLimitIndex = group.rows.findIndex((row) => formatLimitRule(valueForDate(row, date, block.scaleColumn)));
+    const rawLimit = rawLimitIndex >= 0 ? valueForDate(group.rows[rawLimitIndex], date, block.scaleColumn) : "";
     const limitRule = rawLimit ? formatLimitRule(rawLimit) : null;
     if (!limitRule) continue;
-    result.push(makePositionRow(block, group, type, exchange, instrument, date, DEFAULT_TOTAL_POSITION, limitRule, dateIndex, 0));
+    result.push(makePositionRow(block, group, type, exchange, instrument, date, DEFAULT_TOTAL_POSITION, limitRule, dateIndex, 0, positionRowSourceCells(block, group, date, [group.rowIndexes[0], group.rowIndexes[rawLimitIndex]])));
   }
   return { rows: result, unmapped };
 }
 
 function dedupeRows(rows: PositionLimitRow[]): PositionLimitRow[] {
-  return [...new Map(rows.map((row) => [
-    [row.type, row.exchange, row.instrument, row.direction, row.hedge, row.holdingDate, row.totalPosition, row.limitRule].join("|"),
-    row,
-  ])).values()];
+  const unique = new Map<string, PositionLimitRow>();
+  for (const row of rows) {
+    const key = [row.type, row.exchange, row.instrument, row.direction, row.hedge, row.holdingDate, row.totalPosition, row.limitRule].join("|");
+    const existing = unique.get(key);
+    if (existing) {
+      existing.sourceCells = uniqueSourceCells([...existing.sourceCells, ...row.sourceCells]);
+    } else {
+      unique.set(key, row);
+    }
+  }
+  return [...unique.values()];
 }
 
 export function isPositionLimitDocument(document: Document): boolean {
