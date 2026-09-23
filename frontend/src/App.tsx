@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api, type ExportFormat } from "./api";
 import { EXCEPTION_TRADE_HEADERS, extractExceptionTradeTable, isExceptionMonitoringDocument, type ExceptionTradeRow } from "./exceptionTradeModel";
 import { POSITION_LIMIT_HEADERS, extractPositionLimitTable, isPositionLimitDocument, type PositionLimitRow } from "./positionLimitModel";
@@ -387,9 +387,67 @@ function ScheduleEditor({ source, onChange }: { source: Source; onChange: (patch
   return <div className="schedule-editor"><label><input type="checkbox" checked={source.schedule_enabled} onChange={(event) => onChange({ schedule_enabled: event.target.checked })} /> 自动</label><div className="schedule-interval"><input aria-label={`${source.name} 定时间隔（分钟）`} type="number" min="1" max="43200" value={interval} onChange={(event) => setInterval(event.target.value)} onBlur={saveInterval} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} /><span>分钟</span></div><small>{source.schedule_enabled ? `下次 ${formatTime(source.next_run_at)}` : "未启用"}</small></div>;
 }
 
+interface RunHistoryGroup {
+  name: string;
+  runs: Run[];
+}
+
+function groupRunsByName(runs: Run[]): RunHistoryGroup[] {
+  const groups = new Map<string, RunHistoryGroup>();
+  for (const run of runs) {
+    const name = run.source_name || run.requested_url;
+    const group = groups.get(name);
+    if (group) group.runs.push(run);
+    else groups.set(name, { name, runs: [run] });
+  }
+  return [...groups.values()].map((group) => ({
+    ...group,
+    runs: [...group.runs].sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime()),
+  }));
+}
+
 function RunTable({ runs, selectedRunId, onSelect }: { runs: Run[]; selectedRunId: string | null; onSelect: (id: string) => void }) {
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const groups = useMemo(() => groupRunsByName(runs), [runs]);
+
   if (!runs.length) return <div className="empty-state">还没有运行记录。</div>;
-  return <div className="table-scroll"><table className="list-table"><thead><tr><th>状态</th><th>名称</th><th>进度</th><th>创建时间</th><th>变化</th></tr></thead><tbody>{runs.map((run) => <tr className={run.id === selectedRunId ? "selected-row" : ""} key={run.id} onClick={() => onSelect(run.id)}><td><span className={`status-badge ${run.status}`}>{statusText(run.status)}</span></td><td className="strong" title={run.requested_url}>{run.source_name || run.requested_url}</td><td><div className="progress-cell"><div className="progress-track"><span style={{ width: `${run.progress}%` }} /></div><small>{run.progress}%</small></div></td><td>{formatTime(run.created_at)}</td><td>{run.comparison_summary?.has_baseline ? (run.comparison_summary.has_changes ? `${comparisonCount(run.comparison_summary)} 项` : "无变化") : "首次"}</td></tr>)}</tbody></table></div>;
+  function toggleGroup(name: string) {
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
+  function runSummary(run: Run) {
+    return run.comparison_summary?.has_baseline
+      ? (run.comparison_summary.has_changes ? `${comparisonCount(run.comparison_summary)} 项` : "无变化")
+      : "首次";
+  }
+
+  return <div className="table-scroll"><table className="list-table run-history-table"><thead><tr><th>状态</th><th>名称</th><th>进度</th><th>最近运行</th><th>变化</th><th>操作</th></tr></thead><tbody>{groups.map((group) => {
+    const latest = group.runs[0];
+    const expanded = expandedGroups.has(group.name);
+    return <Fragment key={group.name}>
+      <tr className={`run-group-row ${latest.id === selectedRunId ? "selected-row" : ""}`} onClick={() => onSelect(latest.id)}>
+        <td><span className={`status-badge ${latest.status}`}>{statusText(latest.status)}</span></td>
+        <td className="strong" title={latest.requested_url}><span>{group.name}</span><small className="run-count">{group.runs.length} 次运行</small></td>
+        <td><div className="progress-cell"><div className="progress-track"><span style={{ width: `${latest.progress}%` }} /></div><small>{latest.progress}%</small></div></td>
+        <td>{formatTime(latest.created_at)}</td>
+        <td>{runSummary(latest)}</td>
+        <td className="actions"><button type="button" className="quiet" aria-expanded={expanded} onClick={(event) => { event.stopPropagation(); toggleGroup(group.name); }}>{expanded ? "收起历史" : "查看历史"}</button></td>
+      </tr>
+      {expanded && group.runs.map((run) => <tr className={`run-history-row ${run.id === selectedRunId ? "selected-row" : ""}`} key={run.id} onClick={() => onSelect(run.id)}>
+        <td><span className={`status-badge ${run.status}`}>{statusText(run.status)}</span></td>
+        <td className="run-history-name"><span>↳ {group.name}</span><small>{run.id === latest.id ? "最新记录" : "历史记录"}</small></td>
+        <td><div className="progress-cell"><div className="progress-track"><span style={{ width: `${run.progress}%` }} /></div><small>{run.progress}%</small></div></td>
+        <td>{formatTime(run.created_at)}</td>
+        <td>{runSummary(run)}</td>
+        <td />
+      </tr>)}
+    </Fragment>;
+  })}</tbody></table></div>;
 }
 
 function RunDetail({ run, document, compare, stats, dirty, selectedRange, tablePresentation, onTablePresentationChange, onSelectImage, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: DocumentStats; dirty: boolean; selectedRange: CellRange | null; tablePresentation: TablePresentation; onTablePresentationChange: (presentation: TablePresentation) => void; onSelectImage: (candidateId: string) => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: (format: ExportFormat) => void }) {
