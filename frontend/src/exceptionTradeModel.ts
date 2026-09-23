@@ -1,6 +1,7 @@
 import type { Document, Scalar, SourceCellRef } from "./types";
 
 export type InstrumentKind = "期货" | "期权";
+export type ExceptionTradeLevel = "品种级" | "合约级" | "深度虚值合约";
 
 export interface InstrumentMapping {
   name: string;
@@ -19,6 +20,7 @@ export interface ExceptionTradeRow {
   openTotalWarning: number;
   instrumentType: InstrumentKind;
   scope: "product" | "contract";
+  level: ExceptionTradeLevel;
   sourceText: string;
   sourceCells: SourceCellRef[];
 }
@@ -32,6 +34,7 @@ export const EXCEPTION_TRADE_HEADERS = [
   "品种所属交易所",
   "品种/合约名",
   "品种/合约代码",
+  "等级",
   "开仓总量",
   "开仓总量预警",
   "是否期货/期权",
@@ -265,10 +268,11 @@ function makeRow(
   scope: "product" | "contract",
   sourceText: string,
   sourceCells: SourceCellRef[] = [],
+  level: ExceptionTradeLevel = "合约级",
 ): ExceptionTradeRow {
   const instrumentName = mappings.map((item) => item.name).join("、");
   const instrumentCode = [...new Set(codes)].join("、");
-  const id = [mappings.map((item) => item.name).join(","), instrumentCode, openTotal, kind].join("|");
+  const id = [mappings.map((item) => item.name).join(","), instrumentCode, openTotal, kind, level].join("|");
   return {
     id,
     exchange: mappings[0].exchange,
@@ -278,6 +282,7 @@ function makeRow(
     openTotalWarning: warningNumber(openTotal),
     instrumentType: kind,
     scope,
+    level,
     sourceText,
     sourceCells,
   };
@@ -339,23 +344,40 @@ function documentRows(document: Document): Scalar[][] {
   return document.sections.flatMap((section) => section.cells);
 }
 
-function cffexLimits(document: Document): { future: number; option: number } {
+interface CffexLimits {
+  future: number;
+  optionProduct: number;
+  optionContract: number;
+  optionDeepOutOfMoney: number;
+}
+
+function cffexLimits(document: Document): CffexLimits {
+  const limits: CffexLimits = {
+    future: 500,
+    optionProduct: 200,
+    optionContract: 100,
+    optionDeepOutOfMoney: 30,
+  };
   const rows = documentRows(document);
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
     const header = rows[rowIndex].map(cellText);
     const futureColumn = header.findIndex((value) => value.includes("某一合约"));
-    const optionColumn = header.findIndex((value) => value.includes("单个月份期权合约"));
-    if (futureColumn < 0 || optionColumn < 0) continue;
+    const optionProductColumn = header.findIndex((value) => value.includes("品种合计"));
+    const optionContractColumn = header.findIndex((value) => value.includes("单个月份期权合约"));
+    const optionDeepOutOfMoneyColumn = header.findIndex((value) => value.includes("深度虚值合约"));
+    if (futureColumn < 0 && optionProductColumn < 0 && optionContractColumn < 0 && optionDeepOutOfMoneyColumn < 0) continue;
     for (const valueRow of rows.slice(rowIndex + 1, rowIndex + 4)) {
-      const future = exactInteger(valueRow[futureColumn]);
-      const option = exactInteger(valueRow[optionColumn]);
-      if (future !== null && option !== null) return { future, option };
+      const future = futureColumn >= 0 ? exactInteger(valueRow[futureColumn]) : null;
+      const optionProduct = optionProductColumn >= 0 ? exactInteger(valueRow[optionProductColumn]) : null;
+      const optionContract = optionContractColumn >= 0 ? exactInteger(valueRow[optionContractColumn]) : null;
+      const optionDeepOutOfMoney = optionDeepOutOfMoneyColumn >= 0 ? exactInteger(valueRow[optionDeepOutOfMoneyColumn]) : null;
+      if (future !== null) limits.future = future;
+      if (optionProduct !== null) limits.optionProduct = optionProduct;
+      if (optionContract !== null) limits.optionContract = optionContract;
+      if (optionDeepOutOfMoney !== null) limits.optionDeepOutOfMoney = optionDeepOutOfMoney;
     }
   }
-
-  // Keep the sample's published values as a compatibility fallback when
-  // line reconstruction has flattened the CFFEX header/value rows.
-  return { future: 500, option: 100 };
+  return limits;
 }
 
 function cffexRows(document: Document): ExceptionTradeRow[] {
@@ -371,7 +393,7 @@ function cffexRows(document: Document): ExceptionTradeRow[] {
   );
   const cffexSourceCells = cells.filter((cell) => cffexSectionIds.has(cell.ref.sectionId)).map((cell) => cell.ref);
 
-  const { future: futureLimit, option: optionLimit } = cffexLimits(document);
+  const { future: futureLimit, optionProduct, optionContract, optionDeepOutOfMoney } = cffexLimits(document);
 
   const rows: ExceptionTradeRow[] = [];
   const cffex = STATIC_INSTRUMENT_MAPPING;
@@ -388,6 +410,7 @@ function cffexRows(document: Document): ExceptionTradeRow[] {
         "product",
         "股指期货（沪深300、中证500、中证1000、上证50股指期货）",
         cffexSourceCells,
+        "合约级",
       ),
     );
   }
@@ -397,11 +420,32 @@ function cffexRows(document: Document): ExceptionTradeRow[] {
       makeRow(
         mappings,
         mappings.map((mapping) => mapping.optionCode ?? mapping.code),
-        optionLimit,
+        optionProduct,
         "期权",
         "product",
         "股指期权（沪深300、中证1000、上证50股指期权）",
         cffexSourceCells,
+        "品种级",
+      ),
+      makeRow(
+        mappings,
+        mappings.map((mapping) => mapping.optionCode ?? mapping.code),
+        optionContract,
+        "期权",
+        "contract",
+        "股指期权（沪深300、中证1000、上证50股指期权）",
+        cffexSourceCells,
+        "合约级",
+      ),
+      makeRow(
+        mappings,
+        mappings.map((mapping) => mapping.optionCode ?? mapping.code),
+        optionDeepOutOfMoney,
+        "期权",
+        "contract",
+        "股指期权（沪深300、中证1000、上证50股指期权）",
+        cffexSourceCells,
+        "深度虚值合约",
       ),
     );
   }
@@ -409,7 +453,7 @@ function cffexRows(document: Document): ExceptionTradeRow[] {
 }
 
 function rowKey(row: ExceptionTradeRow): string {
-  return [row.exchange, row.instrumentName, row.instrumentCode, row.openTotal, row.instrumentType].join("|");
+  return [row.exchange, row.instrumentName, row.instrumentCode, row.openTotal, row.instrumentType, row.level].join("|");
 }
 
 export function isExceptionMonitoringDocument(document: Document): boolean {

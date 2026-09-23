@@ -145,12 +145,14 @@ def _revision_payload(revision: DocumentRevision | None) -> dict[str, Any] | Non
 
 
 def _run_payload(session: Session, run: Run, store: ArtifactStore) -> dict[str, Any]:
+    source = session.get(Source, run.source_id)
     candidates = list(session.scalars(select(ImageCandidate).where(ImageCandidate.run_id == run.id).order_by(ImageCandidate.ordinal)))
     artifacts = list(session.scalars(select(Artifact).where(Artifact.run_id == run.id).order_by(Artifact.created_at)))
     revision = session.scalar(select(DocumentRevision).where(DocumentRevision.run_id == run.id).order_by(desc(DocumentRevision.revision_number)))
     return {
         "id": run.id,
         "source_id": run.source_id,
+        "source_name": source.name if source else run.requested_url,
         "requested_url": run.requested_url,
         "final_url": run.final_url,
         "profile_key": run.profile_key,

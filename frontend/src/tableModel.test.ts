@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDiffMap, buildQualityMap, cellRangeContains, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, scoreLevel, unmergeCellAt } from "./tableModel";
+import { buildDiffMap, buildQualityMap, cellRangeContains, findEntityDiff, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, scoreLevel, unmergeCellAt } from "./tableModel";
 import type { Document, TableSection } from "./types";
 
 const section: TableSection = {
@@ -51,6 +51,19 @@ describe("table view model", () => {
       sections: [{ kind: "changed", section_id: "S01", baseline_section_id: "S01", label: "主表", before_dimensions: [2, 2], after_dimensions: [2, 2], changes: [{ row: 2, column: 2, kind: "changed", before: 10, after: 11 }], structure_changes: [] }],
     });
     expect(map.get("S01:1:1")).toBe("changed");
+  });
+
+  it("maps raw comparison changes back to an entity row", () => {
+    const diff = findEntityDiff({
+      run_id: "run",
+      baseline: { run_id: "baseline", finished_at: null },
+      has_baseline: true,
+      has_changes: true,
+      summary: { changed_cells: 1, added_cells: 0, removed_cells: 0, added_sections: 0, removed_sections: 0, merge_changes: 0, dimension_changes: 0 },
+      sections: [{ kind: "changed", section_id: "S01", baseline_section_id: "S01", label: "主表", before_dimensions: [2, 2], after_dimensions: [2, 2], changes: [{ row: 2, column: 2, kind: "changed", before: "旧值", after: "新值" }], structure_changes: [] }],
+    }, [{ sectionId: "S01", row: 1, column: 1 }]);
+    expect(diff?.kind).toBe("changed");
+    expect(diff?.changes[0].change.after).toBe("新值");
   });
 
   it("keeps recognized and edited cell content as text", () => {

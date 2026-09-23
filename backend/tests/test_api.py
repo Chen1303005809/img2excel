@@ -89,6 +89,7 @@ def test_source_lifecycle_and_seeded_sources(tmp_path):
         assert enabled.status_code == 200
         queued = client.post(f"/api/sources/{source['id']}/runs")
         assert queued.status_code == 201
+        assert queued.json()["source_name"] == "新页面"
         assert queued.json()["status"] == "queued"
         assert queued.json()["baseline_run_id"] is None
 

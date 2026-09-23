@@ -61,7 +61,7 @@ describe("exception trade table view model", () => {
     ]));
   });
 
-  it("adds the two CFFEX rows whose limits are represented by a numeric subtable", () => {
+  it("adds every CFFEX future and option level from the numeric subtable", () => {
     const result = extractExceptionTradeTable(makeDocument([
       ["中金所", "股指期货（沪深300、中证500、中证1000、上证50股指期货）"],
       ["", "股指期权（沪深300、中证1000、上证50股指期权）"],
@@ -70,9 +70,12 @@ describe("exception trade table view model", () => {
     ]));
 
     expect(result.rows).toEqual(expect.arrayContaining([
-      expect.objectContaining({ instrumentName: "沪深300、中证500、中证1000、上证50", instrumentCode: "IF、IC、IM、IH", openTotal: 500, instrumentType: "期货" }),
-      expect.objectContaining({ instrumentName: "沪深300、中证1000、上证50", instrumentCode: "IO、MO、HO", openTotal: 100, instrumentType: "期权" }),
+      expect.objectContaining({ instrumentName: "沪深300、中证500、中证1000、上证50", instrumentCode: "IF、IC、IM、IH", openTotal: 500, instrumentType: "期货", level: "合约级" }),
+      expect.objectContaining({ instrumentName: "沪深300、中证1000、上证50", instrumentCode: "IO、MO、HO", openTotal: 200, instrumentType: "期权", level: "品种级" }),
+      expect.objectContaining({ instrumentName: "沪深300、中证1000、上证50", instrumentCode: "IO、MO、HO", openTotal: 100, instrumentType: "期权", level: "合约级" }),
+      expect.objectContaining({ instrumentName: "沪深300、中证1000、上证50", instrumentCode: "IO、MO、HO", openTotal: 30, instrumentType: "期权", level: "深度虚值合约" }),
     ]));
+    expect(result.rows).toHaveLength(4);
   });
 
   it("maps every limit product in the July sample without dropping a cell", () => {
@@ -127,6 +130,7 @@ describe("exception trade table view model", () => {
 
     expect(result.unmappedLimitCells).toEqual([]);
     expect(result.rows).toHaveLength(52);
+    expect(result.rows.every((row) => row.level === "合约级")).toBe(true);
     expect(result.rows.find((row) => row.instrumentCode === "SC")).toMatchObject({ openTotal: 400, openTotalWarning: 320 });
     expect(result.rows.find((row) => row.instrumentCode === "PS2607、PS2608、PS2609、PS2610、PS2611、PS2612、PS2701、PS2702、PS2703、PS2704、PS2705、PS2706、PS2707")?.openTotal).toBe(200);
   });

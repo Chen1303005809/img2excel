@@ -65,6 +65,7 @@ export interface Revision {
 
 export interface Run extends RunSummary {
   source_id: string;
+  source_name: string;
   requested_url: string;
   final_url: string | null;
   profile_key: string;
