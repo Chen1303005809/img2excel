@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     database_url: str | None = None
     oracle_database_url: str | None = None
     oracle_config_dir: Path | None = None
+    oracle_client_lib_dir: Path | None = None
+    oracle_thick_mode: bool = False
     oracle_creator_id: int | None = None
     oracle_creator_lookup_sql: str | None = None
     oracle_application_version: str = "V260123"

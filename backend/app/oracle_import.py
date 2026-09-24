@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -810,12 +811,26 @@ class OracleTemplateWriter:
                 tns_admin = os.environ.get("TNS_ADMIN", "").strip()
                 if tns_admin:
                     connect_args["config_dir"] = os.path.expanduser(tns_admin)
-            engine = create_engine(
-                self.settings.oracle_database_url,
-                pool_pre_ping=True,
-                pool_timeout=timeout_seconds,
-                connect_args=connect_args,
-            )
+            thick_mode: bool | dict[str, str] | None = None
+            if self.settings.oracle_client_lib_dir is not None:
+                thick_mode = {}
+                if not sys.platform.startswith("linux"):
+                    thick_mode["lib_dir"] = str(self.settings.oracle_client_lib_dir.expanduser())
+                if "config_dir" in connect_args:
+                    thick_mode["config_dir"] = connect_args["config_dir"]
+                if not thick_mode:
+                    thick_mode = True
+            elif self.settings.oracle_thick_mode:
+                thick_mode = {"config_dir": connect_args["config_dir"]} if "config_dir" in connect_args else True
+
+            engine_kwargs: dict[str, Any] = {
+                "pool_pre_ping": True,
+                "pool_timeout": timeout_seconds,
+                "connect_args": connect_args,
+            }
+            if thick_mode is not None:
+                engine_kwargs["thick_mode"] = thick_mode
+            engine = create_engine(self.settings.oracle_database_url, **engine_kwargs)
             call_timeout_ms = timeout_seconds * 1000
 
             def set_call_timeout(dbapi_connection: Any, _connection_record: Any) -> None:

@@ -59,6 +59,9 @@ cd frontend && npm run dev
 | `IMAGE_TABLE_LEASE_SECONDS` | `900` | Worker 租约超时恢复时间 |
 | `IMAGE_TABLE_ALLOW_PRIVATE_HOSTS` | `false` | 是否允许抓取本机/私有地址 |
 | `IMAGE_TABLE_ORACLE_DATABASE_URL` | 空 | Oracle 目标库 SQLAlchemy 连接串；只放在运行环境，不写入代码或导入产物 |
+| `IMAGE_TABLE_ORACLE_CONFIG_DIR` | 空 | Oracle 网络配置目录；连接 TNS 别名时指向包含 `tnsnames.ora` 的目录 |
+| `IMAGE_TABLE_ORACLE_CLIENT_LIB_DIR` | 空 | Oracle Instant Client 库目录；设置后启用 Thick 模式以兼容旧版 Oracle |
+| `IMAGE_TABLE_ORACLE_THICK_MODE` | `false` | Oracle 客户端已在系统搜索路径中时，设为 `true` 启用 Thick 模式 |
 | `IMAGE_TABLE_ORACLE_CREATOR_ID` | 空 | 直接指定 `CREATOR` 业务用户 ID；与用户映射 SQL 二选一 |
 | `IMAGE_TABLE_ORACLE_CREATOR_LOOKUP_SQL` | 空 | 使用绑定参数 `:session_user` 按 Oracle 当前登录用户查询业务用户 ID |
 | `IMAGE_TABLE_ORACLE_APPLICATION_VERSION` | `V260123` | 写入模板头表的功能版本号 |

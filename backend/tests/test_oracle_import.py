@@ -302,6 +302,56 @@ def test_oracle_tns_admin_is_passed_to_driver(monkeypatch):
     assert captured["connect_args"]["config_dir"] == tns_admin
 
 
+def test_oracle_old_server_uses_thick_mode(monkeypatch):
+    client_lib_dir = "/opt/oracle/instantclient_19_22"
+    captured: dict[str, object] = {}
+    engine = object()
+
+    def fake_create_engine(_url, **kwargs):
+        if kwargs.get("thick_mode") != {"lib_dir": client_lib_dir}:
+            raise RuntimeError(
+                "(oracledb.exceptions.OperationalError) DPY-6005: cannot connect to database; "
+                "DPY-3010: connections to this database server version are not supported by "
+                "python-oracledb in thin mode"
+            )
+        captured["thick_mode"] = kwargs["thick_mode"]
+        return engine
+
+    monkeypatch.setattr(oracle_import, "create_engine", fake_create_engine)
+    monkeypatch.setattr(oracle_import.event, "listen", lambda *_args: None)
+
+    writer = oracle_import.OracleTemplateWriter(
+        Settings(
+            oracle_database_url="oracle+oracledb://user:password@192.168.1.20:1521/?service_name=ORCL",
+            oracle_client_lib_dir=client_lib_dir,
+        )
+    )
+
+    assert writer._engine_or_raise() is engine
+    assert captured["thick_mode"] == {"lib_dir": client_lib_dir}
+
+
+def test_oracle_linux_uses_system_client_library_path(monkeypatch):
+    engine = object()
+    monkeypatch.setattr(oracle_import.sys, "platform", "linux")
+
+    def fake_create_engine(_url, **kwargs):
+        assert kwargs["thick_mode"] is True
+        return engine
+
+    monkeypatch.setattr(oracle_import, "create_engine", fake_create_engine)
+    monkeypatch.setattr(oracle_import.event, "listen", lambda *_args: None)
+
+    writer = oracle_import.OracleTemplateWriter(
+        Settings(
+            oracle_database_url="oracle+oracledb://user:password@192.168.1.20:1521/?service_name=ORCL",
+            oracle_client_lib_dir="/opt/oracle/instantclient_19_22",
+        )
+    )
+
+    assert writer._engine_or_raise() is engine
+
+
 def test_invalid_date_and_warning_stop_before_oracle(tmp_path):
     settings = Settings(data_dir=tmp_path, database_url=f"sqlite:///{tmp_path / 'app.db'}")
     fake = FakeOracleWriter()
