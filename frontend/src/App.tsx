@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { api, type ExportFormat } from "./api";
+import { api, type DatabaseImportTemplateType, type ExportFormat } from "./api";
 import { EXCEPTION_TRADE_HEADERS, extractExceptionTradeTable, isExceptionMonitoringDocument, type ExceptionTradeRow } from "./exceptionTradeModel";
 import { POSITION_LIMIT_HEADERS, extractPositionLimitTable, isPositionLimitDocument, type PositionLimitRow } from "./positionLimitModel";
 import { buildDiffMap, buildQualityMap, cellDisplay, cellRangeContains, cloneDocument, findEntityDiff, findMergeAt, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, rangesOverlap, scoreLevel, unmergeCellAt, type CellRange, type EntityDiff } from "./tableModel";
@@ -116,6 +116,7 @@ function App() {
   const [document, setDocument] = useState<Document | null>(null);
   const [savedDocument, setSavedDocument] = useState<Document | null>(null);
   const [recognizedHash, setRecognizedHash] = useState("");
+  const [documentHash, setDocumentHash] = useState("");
   const [revisionId, setRevisionId] = useState<string | undefined>();
   const [compare, setCompare] = useState<CompareResult | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
@@ -126,6 +127,7 @@ function App() {
   const [statusFilter, setStatusFilter] = useState("");
   const [selectedRange, setSelectedRange] = useState<CellRange | null>(null);
   const [tablePresentation, setTablePresentation] = useState<TablePresentation>("ocr");
+  const [databaseImportLoading, setDatabaseImportLoading] = useState(false);
 
   const refreshSources = useCallback(async () => setSources(await api.sources()), []);
   const refreshRuns = useCallback(async () => setRuns(await api.runs(sourceFilter || undefined, statusFilter || undefined)), [sourceFilter, statusFilter]);
@@ -141,6 +143,7 @@ function App() {
       setDocument(documentResponse.document);
       setSavedDocument(cloneDocument(documentResponse.document));
       setRecognizedHash(documentResponse.recognized_document_sha256);
+      setDocumentHash(documentResponse.document_sha256);
       setRevisionId(documentResponse.revision?.id);
       setCompare(comparison);
     } else {
@@ -148,6 +151,8 @@ function App() {
       setSavedDocument(null);
       setCompare(null);
       setRevisionId(undefined);
+      setRecognizedHash("");
+      setDocumentHash("");
     }
   }, []);
 
@@ -239,6 +244,56 @@ function App() {
       for (const artifact of result.artifacts) window.open(artifact.download_url, "_blank", "noopener,noreferrer");
     } catch (error) {
       setNotice({ kind: "error", text: (error as Error).message });
+    }
+  }
+
+  async function importDatabase() {
+    if (!selectedRunId || !document || !documentHash) return;
+    if (isDirty) {
+      setNotice({ kind: "error", text: "当前有未保存修订，请先保存修订后再写入数据库" });
+      return;
+    }
+    const positionTable = isPositionLimitDocument(document) ? extractPositionLimitTable(document) : null;
+    const exceptionTable = !positionTable && isExceptionMonitoringDocument(document) ? extractExceptionTradeTable(document) : null;
+    if (!positionTable && !exceptionTable) {
+      setNotice({ kind: "error", text: "当前文档不是可导入的期权限仓或开仓总量实体表" });
+      return;
+    }
+
+    const templateType: DatabaseImportTemplateType = positionTable ? "TEMP_POSITIONLIMIT_DETAIL" : "TEMP_OPENTOTALLIMIT";
+    setDatabaseImportLoading(true);
+    try {
+      const preflight = await api.preflightDatabaseImport(selectedRunId, {
+        view: revisionId ? "revised" : "recognized",
+        documentSha256: documentHash,
+        templateType,
+        positionRows: positionTable?.rows,
+        exceptionRows: exceptionTable?.rows,
+        unmappedCells: positionTable?.unmappedCells,
+        unmappedLimitCells: exceptionTable?.unmappedLimitCells,
+      });
+      if (preflight.status !== "preflight_succeeded") {
+        const firstIssues = preflight.issues.slice(0, 3).map((issue) => {
+          const rowLabel = issue.entity_index >= 0 ? `第${issue.entity_index + 1}行` : "批次";
+          const sourceLabel = issue.source_cells.length ? `（来源 ${issue.source_cells[0].sectionId}[${issue.source_cells[0].row},${issue.source_cells[0].column}]）` : "";
+          return `${rowLabel} ${issue.field}：${issue.message}${sourceLabel}`;
+        }).join("；");
+        setNotice({ kind: "error", text: `预校验未通过（${preflight.issues.length}项）：${firstIssues || "请查看后端审计详情"}` });
+        return;
+      }
+
+      const totalRows = preflight.counts.total_rows ?? 0;
+      const targetName = templateType === "TEMP_POSITIONLIMIT_DETAIL" ? "期权限仓" : "开仓总量限制";
+      if (!window.confirm(`预校验通过，将创建 Oracle 草稿模板“${preflight.template_name}”，类型：${targetName}，写入 ${totalRows} 条明细。确认提交吗？`)) {
+        setNotice({ kind: "success", text: "预校验已通过，已取消本次提交；可再次点击写入数据库继续提交" });
+        return;
+      }
+      const committed = await api.commitDatabaseImport(preflight.batch_id);
+      setNotice({ kind: "success", text: `数据库写入成功：模板 ${committed.target_template_ids[0] ?? "已创建"}，写入 ${committed.counts.total_rows ?? totalRows} 条明细` });
+    } catch (error) {
+      setNotice({ kind: "error", text: (error as Error).message });
+    } finally {
+      setDatabaseImportLoading(false);
     }
   }
 
@@ -356,7 +411,7 @@ function App() {
         </section>
 
         <aside className="detail-column">
-          <RunDetail run={selectedRun} document={document} compare={compare} stats={stats} dirty={isDirty} selectedRange={selectedRange} tablePresentation={tablePresentation} onTablePresentationChange={setTablePresentation} onSelectImage={selectImage} onChangeCell={updateCell} onSelectCell={selectCell} onMerge={mergeSelectedCells} onUnmerge={unmergeSelectedCell} onSave={saveRevision} onExport={exportRun} />
+          <RunDetail run={selectedRun} document={document} compare={compare} stats={stats} dirty={isDirty} databaseImportLoading={databaseImportLoading} selectedRange={selectedRange} tablePresentation={tablePresentation} onTablePresentationChange={setTablePresentation} onSelectImage={selectImage} onChangeCell={updateCell} onSelectCell={selectCell} onMerge={mergeSelectedCells} onUnmerge={unmergeSelectedCell} onSave={saveRevision} onExport={exportRun} onDatabaseImport={importDatabase} />
         </aside>
       </main>
     </div>
@@ -450,7 +505,7 @@ function RunTable({ runs, selectedRunId, onSelect }: { runs: Run[]; selectedRunI
   })}</tbody></table></div>;
 }
 
-function RunDetail({ run, document, compare, stats, dirty, selectedRange, tablePresentation, onTablePresentationChange, onSelectImage, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: DocumentStats; dirty: boolean; selectedRange: CellRange | null; tablePresentation: TablePresentation; onTablePresentationChange: (presentation: TablePresentation) => void; onSelectImage: (candidateId: string) => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: (format: ExportFormat) => void }) {
+function RunDetail({ run, document, compare, stats, dirty, databaseImportLoading, selectedRange, tablePresentation, onTablePresentationChange, onSelectImage, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport, onDatabaseImport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: DocumentStats; dirty: boolean; databaseImportLoading: boolean; selectedRange: CellRange | null; tablePresentation: TablePresentation; onTablePresentationChange: (presentation: TablePresentation) => void; onSelectImage: (candidateId: string) => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: (format: ExportFormat) => void; onDatabaseImport: () => void }) {
   if (!run) return <section className="panel detail-empty"><div className="empty-illustration">↗</div><h2>选择一次运行</h2><p>从来源页或运行历史中选择记录，这里会显示任务进度、数据表和历史差异。</p></section>;
   const supportsEntityPresentation = Boolean(document && (isPositionLimitDocument(document) || isExceptionMonitoringDocument(document)));
   const showingEntityPresentation = tablePresentation === "entity" && supportsEntityPresentation;
@@ -459,7 +514,7 @@ function RunDetail({ run, document, compare, stats, dirty, selectedRange, tableP
     {run.status === "awaiting_image_selection" && <CandidatePicker candidates={run.candidates} onSelect={onSelectImage} />}
     {run.status === "succeeded" && document && <>
       {(!showingEntityPresentation || !supportsEntityPresentation) && <ComparisonPanel compare={compare} />}
-      <section className={`panel data-panel ${showingEntityPresentation ? "entity-data-panel" : ""}`}><div className="panel-heading"><div><p className="eyebrow">DATA PANEL</p><h2>{showingEntityPresentation ? "实体整理表" : "OCR 识别结果"} {dirty && <span className="unsaved-badge">有未保存修改</span>}</h2><p className="muted">{showingEntityPresentation ? "当前展示由 OCR 结果整理出的业务实体表；如需修订识别文本，请切回 OCR 结果。" : "默认展示 OCR 原始识别结果，可修改单元格值并核对合并关系。整理为实体表后，原始 OCR 结果仍可切回查看。"}</p></div><div className="button-row">{supportsEntityPresentation && <button type="button" className={showingEntityPresentation ? "quiet" : "primary"} onClick={() => onTablePresentationChange(showingEntityPresentation ? "ocr" : "entity")}>{showingEntityPresentation ? "查看 OCR 结果" : "整理为实体表"}</button>}<button type="button" className={dirty ? "primary" : "quiet"} onClick={onSave}>保存修订</button><button type="button" className="primary" onClick={() => void onExport("json")}>导出 JSON</button><button type="button" className="primary" onClick={() => void onExport("xlsx")}>导出 XLSX</button></div></div><div className="data-workspace"><OriginalImageViewer run={run} /><div className={`document-results-scroll ${showingEntityPresentation ? "entity-results-scroll" : ""}`}><DocumentTables tablePresentation={showingEntityPresentation ? "entity" : "ocr"} document={document} compare={compare} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} /></div></div></section>
+      <section className={`panel data-panel ${showingEntityPresentation ? "entity-data-panel" : ""}`}><div className="panel-heading"><div><p className="eyebrow">DATA PANEL</p><h2>{showingEntityPresentation ? "实体整理表" : "OCR 识别结果"} {dirty && <span className="unsaved-badge">有未保存修改</span>}</h2><p className="muted">{showingEntityPresentation ? "当前展示由 OCR 结果整理出的业务实体表；如需修订识别文本，请切回 OCR 结果。" : "默认展示 OCR 原始识别结果，可修改单元格值并核对合并关系。整理为实体表后，原始 OCR 结果仍可切回查看。"}</p></div><div className="button-row">{supportsEntityPresentation && <button type="button" className={showingEntityPresentation ? "quiet" : "primary"} onClick={() => onTablePresentationChange(showingEntityPresentation ? "ocr" : "entity")}>{showingEntityPresentation ? "查看 OCR 结果" : "整理为实体表"}</button>}{supportsEntityPresentation && <button type="button" className="primary" disabled={!showingEntityPresentation || dirty || databaseImportLoading} title={dirty ? "请先保存修订" : undefined} onClick={onDatabaseImport}>{databaseImportLoading ? "预校验中…" : "写入数据库"}</button>}<button type="button" className={dirty ? "primary" : "quiet"} onClick={onSave}>保存修订</button><button type="button" className="primary" onClick={() => void onExport("json")}>导出 JSON</button><button type="button" className="primary" onClick={() => void onExport("xlsx")}>导出 XLSX</button></div></div><div className="data-workspace"><OriginalImageViewer run={run} /><div className={`document-results-scroll ${showingEntityPresentation ? "entity-results-scroll" : ""}`}><DocumentTables tablePresentation={showingEntityPresentation ? "entity" : "ocr"} document={document} compare={compare} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} /></div></div></section>
       <Artifacts run={run} />
     </>}
   </>;

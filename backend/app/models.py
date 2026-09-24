@@ -109,3 +109,51 @@ class DocumentRevision(Base):
     document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     changed_cell_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class DatabaseImportBatch(Base):
+    __tablename__ = "database_import_batches"
+    __table_args__ = (
+        Index("ix_database_import_batches_run_created", "run_id", "created_at"),
+        Index("ix_database_import_batches_status_created", "status", "created_at"),
+        UniqueConstraint(
+            "run_id",
+            "source_document_sha256",
+            "template_type",
+            "entity_fingerprint",
+            name="uq_database_import_batch_fingerprint",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False, index=True)
+    revision_id: Mapped[str | None] = mapped_column(ForeignKey("document_revisions.id"), nullable=True)
+    view: Mapped[str] = mapped_column(String(20), nullable=False, default="recognized")
+    template_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    template_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    counts: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    used_derived_warning: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    target_template_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DatabaseImportIssue(Base):
+    __tablename__ = "database_import_issues"
+    __table_args__ = (Index("ix_database_import_issues_batch", "batch_id", "entity_index"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    batch_id: Mapped[str] = mapped_column(ForeignKey("database_import_batches.id"), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    entity_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    field: Mapped[str] = mapped_column(String(80), nullable=False)
+    code: Mapped[str] = mapped_column(String(80), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    source_cells: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)

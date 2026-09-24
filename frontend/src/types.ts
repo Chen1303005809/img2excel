@@ -127,6 +127,7 @@ export interface DocumentResponse {
   run_id: string;
   view: "recognized" | "revised";
   recognized_document_sha256: string;
+  document_sha256: string;
   revision: Revision | null;
   document: Document;
   raw_artifact: Artifact;

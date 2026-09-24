@@ -1,6 +1,48 @@
 import type { Artifact, CompareResult, DocumentResponse, Run, Source } from "./types";
+import type { ExceptionTradeRow } from "./exceptionTradeModel";
+import type { PositionLimitRow } from "./positionLimitModel";
 
 export type ExportFormat = "json" | "xlsx";
+export type DatabaseImportTemplateType = "TEMP_POSITIONLIMIT_DETAIL" | "TEMP_OPENTOTALLIMIT";
+
+export interface DatabaseImportIssue {
+  entity_type: string;
+  entity_index: number;
+  field: string;
+  code: string;
+  message: string;
+  source_cells: { sectionId: string; row: number; column: number }[];
+}
+
+export interface DatabaseImportResult {
+  batch_id: string;
+  run_id: string;
+  revision_id: string | null;
+  view: "recognized" | "revised";
+  template_type: DatabaseImportTemplateType;
+  template_name: string;
+  source_document_sha256: string;
+  fingerprint: string;
+  status: string;
+  counts: Record<string, number>;
+  used_derived_warning: boolean;
+  target_template_ids: string[];
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  committed_at: string | null;
+  issues: DatabaseImportIssue[];
+}
+
+export interface DatabaseImportRequest {
+  view: "recognized" | "revised";
+  documentSha256: string;
+  templateType: DatabaseImportTemplateType;
+  positionRows?: PositionLimitRow[];
+  exceptionRows?: ExceptionTradeRow[];
+  unmappedCells?: string[];
+  unmappedLimitCells?: string[];
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -50,4 +92,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ revision_id: revisionId, formats: [format] }),
     }),
+  preflightDatabaseImport: (runId: string, body: DatabaseImportRequest) =>
+    request<DatabaseImportResult>(`/api/runs/${runId}/database-import/preflight`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  commitDatabaseImport: (batchId: string) =>
+    request<DatabaseImportResult>(`/api/database-imports/${batchId}/commit`, { method: "POST" }),
 };

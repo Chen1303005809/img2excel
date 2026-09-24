@@ -41,12 +41,14 @@ describe("exception trade table view model", () => {
     expect(result.rows).toEqual(expect.arrayContaining([
       expect.objectContaining({
         exchange: "郑州商品交易所",
+        exchangeCode: "CZCE",
         instrumentName: "动力煤",
         instrumentCode: "ZC2607、ZC2608、ZC2701",
         openTotal: 20,
         openTotalWarning: 16,
         instrumentType: "期货",
         scope: "contract",
+        warningOrigin: "derived_80",
       }),
       expect.objectContaining({
         exchange: "大连商品交易所",

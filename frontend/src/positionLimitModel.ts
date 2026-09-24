@@ -1,16 +1,29 @@
-import { INSTRUMENT_MAPPINGS, type InstrumentMapping } from "./exceptionTradeModel";
+import { exchangeCodeForName, INSTRUMENT_MAPPINGS, type InstrumentMapping } from "./exceptionTradeModel";
 import type { Document, Scalar, SourceCellRef, TableSection } from "./types";
 
 export type PositionLimitInstrumentType = "期货" | "期权";
+
+export interface PositionDateRule {
+  startmonth: number;
+  startday: number;
+  startdaytype: 0 | 1;
+  endmonth: number;
+  endday: number;
+  enddaytype: 0 | 1;
+  startordertype: 0 | 1;
+  endordertype: 0 | 1;
+}
 
 export interface PositionLimitRow {
   id: string;
   type: PositionLimitInstrumentType;
   exchange: string;
+  exchangeCode: string | null;
   instrument: string;
   direction: string;
   hedge: string;
   holdingDate: string;
+  dateRule?: PositionDateRule;
   totalPosition: string;
   limitRule: string;
   sourceText: string;
@@ -420,6 +433,85 @@ function positionRowSourceCells(block: LimitBlock, group: ProductGroup, date: Da
   return uniqueSourceCells(cells);
 }
 
+const SMALL_CHINESE_NUMBERS: Readonly<Record<string, number>> = Object.freeze({
+  零: 0,
+  一: 1,
+  二: 2,
+  两: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6,
+  七: 7,
+  八: 8,
+  九: 9,
+  十: 10,
+});
+
+function smallChineseNumber(value: string): number | null {
+  if (/^\d+$/.test(value)) return Number(value);
+  if (value in SMALL_CHINESE_NUMBERS) return SMALL_CHINESE_NUMBERS[value];
+  if (value.startsWith("十")) return 10 + (SMALL_CHINESE_NUMBERS[value.slice(1)] ?? 0);
+  const [left, right] = value.split("十");
+  if (!right && !left) return null;
+  if (value.includes("十")) return (SMALL_CHINESE_NUMBERS[left] ?? 0) * 10 + (SMALL_CHINESE_NUMBERS[right] ?? 0);
+  return null;
+}
+
+function parseDateEndpoint(value: string, start: boolean): { month: number; day: number; daytype: 0 | 1; ordertype: 0 | 1 } | null {
+  let text = compact(value).replace(/^[自从]/, "").replace(/期间.*$/, "").replace(/(起|开始)$/, "");
+  if (text.includes("合约挂牌") || text.includes("合约上市")) return { month: -1, day: -1, daytype: 0, ordertype: 0 };
+  if (text.includes("最后交易日")) return { month: -3, day: -1, daytype: 0, ordertype: 0 };
+  if (text === "交割月" || text === "交割月份") return { month: start ? -2 : -1, day: start ? -2 : -1, daytype: 0, ordertype: 0 };
+
+  const monthMatch = text.match(/交割月(?:前|之前)?([0-9一二两三四五六七八九十]+)个?月/);
+  const month = monthMatch
+    ? (smallChineseNumber(monthMatch[1]) ?? -999)
+    : text.includes("交割月")
+      ? (start ? -2 : -1)
+      : -999;
+  if (month === -999) return null;
+
+  const daytype: 0 | 1 = text.includes("日历") ? 1 : 0;
+  let ordertype: 0 | 1 = text.includes("最后一个") || text.includes("最后") ? 1 : 0;
+  const dayMatch = text.match(/第(最后一个|[0-9一二两三四五六七八九十]+)个?(?:交易日|日历日|日)/);
+  if (!dayMatch) return null;
+  const day = dayMatch[1] === "最后一个" ? 1 : smallChineseNumber(dayMatch[1]);
+  if (day === null) return null;
+  if (dayMatch[1] === "最后一个") ordertype = 1;
+  return { month, day, daytype, ordertype };
+}
+
+function parsePositionDateRule(value: string): PositionDateRule | undefined {
+  const text = compact(value);
+  if (text === "合约挂牌至交割月份" || text === "合约上市至交割月份") {
+    return { startmonth: -1, startday: -1, startdaytype: 0, endmonth: -1, endday: -1, enddaytype: 0, startordertype: 0, endordertype: 0 };
+  }
+  let start: ReturnType<typeof parseDateEndpoint>;
+  let end: ReturnType<typeof parseDateEndpoint>;
+  if (text.includes("至")) {
+    const [startText, endText] = text.split("至", 2);
+    start = parseDateEndpoint(startText, true);
+    end = parseDateEndpoint(endText, false);
+  } else if (text.includes("起")) {
+    start = parseDateEndpoint(text, true);
+    end = parseDateEndpoint("交割月", false);
+  } else {
+    return undefined;
+  }
+  if (!start || !end) return undefined;
+  return {
+    startmonth: start.month,
+    startday: start.day,
+    startdaytype: start.daytype,
+    endmonth: end.month,
+    endday: end.day,
+    enddaytype: end.daytype,
+    startordertype: start.ordertype,
+    endordertype: end.ordertype,
+  };
+}
+
 function makePositionRow(
   block: LimitBlock,
   group: ProductGroup,
@@ -438,10 +530,12 @@ function makePositionRow(
     id: `${groupId}:${dateIndex}:${ruleIndex}:${totalPosition}:${limitRule}`,
     type: instrumentTypeValue,
     exchange,
+    exchangeCode: exchangeCodeForName(exchange),
     instrument,
     direction: "所有",
     hedge: "所有",
     holdingDate: normalizeDateLabel(date.label),
+    dateRule: parsePositionDateRule(normalizeDateLabel(date.label)),
     totalPosition,
     limitRule,
     sourceText: groupSourceText(group),
@@ -491,10 +585,12 @@ function simplePositionRows(
       id: `${groupId}:0:${DEFAULT_TOTAL_POSITION}:${limitRule}`,
       type,
       exchange,
+      exchangeCode: exchangeCodeForName(exchange),
       instrument,
       direction: "所有",
       hedge: "所有",
       holdingDate: "合约挂牌至交割月份",
+      dateRule: parsePositionDateRule("合约挂牌至交割月份"),
       totalPosition: DEFAULT_TOTAL_POSITION,
       limitRule,
       sourceText: rows[rowIndex].filter(Boolean).map(displayText).join("；"),

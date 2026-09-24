@@ -67,7 +67,7 @@ describe("position limit table", () => {
     expect(isPositionLimitDocument(fixtureDocument())).toBe(true);
     expect(table.rows.length).toBeGreaterThan(5);
     expect(table.unmappedCells).toEqual([]);
-    expect(table.rows.some((row) => row.exchange === "大连商品交易所" && row.instrument === "V、PP、L")).toBe(true);
+    expect(table.rows.some((row) => row.exchange === "大连商品交易所" && row.instrument === "V、PP、L" && row.exchangeCode === "DCE")).toBe(true);
     expect(table.rows.some((row) => row.exchange === "郑州商品交易所" && row.instrument === "TA")).toBe(true);
   });
 
@@ -82,6 +82,7 @@ describe("position limit table", () => {
         expect.objectContaining({ totalPosition: "0<=持仓量<+∞", limitRule: "固定值5000" }),
       ]),
     );
+    expect(taRows[0].dateRule).toEqual(expect.objectContaining({ startmonth: -1, endmonth: 1, endday: 15 }));
   });
 
   it("does not classify an exception-monitoring document as position limits", () => {

@@ -14,6 +14,7 @@ export interface InstrumentMapping {
 export interface ExceptionTradeRow {
   id: string;
   exchange: string;
+  exchangeCode: string | null;
   instrumentName: string;
   instrumentCode: string;
   openTotal: number;
@@ -21,6 +22,7 @@ export interface ExceptionTradeRow {
   instrumentType: InstrumentKind;
   scope: "product" | "contract";
   level: ExceptionTradeLevel;
+  warningOrigin: "source" | "derived_80";
   sourceText: string;
   sourceCells: SourceCellRef[];
 }
@@ -143,6 +145,7 @@ export const INSTRUMENT_MAPPINGS: readonly InstrumentMapping[] = [
   { name: "多晶硅", code: "PS", exchange: "广州期货交易所", aliases: ["多晶硅"] },
 
   // China Financial Futures Exchange
+  { name: "AF", code: "AF", exchange: "中国金融期货交易所", aliases: ["AF"] },
   { name: "沪深300", code: "IF", optionCode: "IO", exchange: "中国金融期货交易所", aliases: ["沪深300"] },
   { name: "中证500", code: "IC", exchange: "中国金融期货交易所", aliases: ["中证500"] },
   { name: "中证1000", code: "IM", optionCode: "MO", exchange: "中国金融期货交易所", aliases: ["中证1000"] },
@@ -152,6 +155,25 @@ export const INSTRUMENT_MAPPINGS: readonly InstrumentMapping[] = [
 export const STATIC_INSTRUMENT_MAPPING: Readonly<Record<string, InstrumentMapping>> = Object.freeze(
   Object.fromEntries(INSTRUMENT_MAPPINGS.map((item) => [item.name, item])),
 );
+
+const EXCHANGE_CODE_BY_NAME: Readonly<Record<string, string>> = Object.freeze({
+  "大连商品交易所": "DCE",
+  "大商所": "DCE",
+  "郑州商品交易所": "CZCE",
+  "郑商所": "CZCE",
+  "上海期货交易所": "SHFE",
+  "上期所": "SHFE",
+  "上海国际能源交易中心": "INE",
+  "能源中心": "INE",
+  "中国金融期货交易所": "CFFEX",
+  "中金所": "CFFEX",
+  "广州期货交易所": "GFEX",
+  "广期所": "GFEX",
+});
+
+export function exchangeCodeForName(name: string): string | null {
+  return EXCHANGE_CODE_BY_NAME[name.trim()] ?? null;
+}
 
 export const DEFAULT_WARNING_RATIO = 0.8;
 
@@ -276,6 +298,7 @@ function makeRow(
   return {
     id,
     exchange: mappings[0].exchange,
+    exchangeCode: exchangeCodeForName(mappings[0].exchange),
     instrumentName,
     instrumentCode,
     openTotal,
@@ -283,6 +306,7 @@ function makeRow(
     instrumentType: kind,
     scope,
     level,
+    warningOrigin: "derived_80",
     sourceText,
     sourceCells,
   };

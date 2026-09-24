@@ -11,10 +11,11 @@ from .artifacts import ArtifactStore
 from .config import Settings, get_settings
 from .database import build_engine, run_migrations
 from .models import Base
+from .oracle_import import OracleWriter
 from .seed import seed_sources
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, oracle_writer: OracleWriter | None = None) -> FastAPI:
     settings = settings or get_settings()
     settings.resolved_data_dir.mkdir(parents=True, exist_ok=True)
     engine = build_engine(settings)
@@ -53,7 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.engine = engine
     app.state.session_factory = session_factory
     app.state.artifact_store = store
-    app.include_router(build_router(session_factory, store, settings))
+    app.include_router(build_router(session_factory, store, settings, oracle_writer=oracle_writer))
     return app
 
 

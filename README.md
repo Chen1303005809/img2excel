@@ -58,6 +58,11 @@ cd frontend && npm run dev
 | `IMAGE_TABLE_OCR_CUDA_DEVICE_ID` | `0` | CUDA GPU 编号 |
 | `IMAGE_TABLE_LEASE_SECONDS` | `900` | Worker 租约超时恢复时间 |
 | `IMAGE_TABLE_ALLOW_PRIVATE_HOSTS` | `false` | 是否允许抓取本机/私有地址 |
+| `IMAGE_TABLE_ORACLE_DATABASE_URL` | 空 | Oracle 目标库 SQLAlchemy 连接串；只放在运行环境，不写入代码或导入产物 |
+| `IMAGE_TABLE_ORACLE_CREATOR_ID` | 空 | 直接指定 `CREATOR` 业务用户 ID；与用户映射 SQL 二选一 |
+| `IMAGE_TABLE_ORACLE_CREATOR_LOOKUP_SQL` | 空 | 使用绑定参数 `:session_user` 按 Oracle 当前登录用户查询业务用户 ID |
+| `IMAGE_TABLE_ORACLE_APPLICATION_VERSION` | `V260123` | 写入模板头表的功能版本号 |
+| `IMAGE_TABLE_ORACLE_IMPORT_TIMEOUT_SECONDS` | `30` | Oracle TCP 连接、调用和连接池超时 |
 
 定时抓取在“来源管理”中按来源配置。勾选“自动”，输入抓取间隔（1–43,200 分钟）后失焦保存；Worker 会在下一次到期时自动创建运行记录。停用来源或取消“自动”后不会再创建定时任务，已排队的运行仍会正常处理。
 
@@ -73,6 +78,7 @@ cd frontend && npm run dev
 8. 修订写入 `revisions/`，原始识别 JSON/XLSX 永不覆盖。下一次运行默认比较上一条成功运行的原始 OCR 文档。
 9. 识别到“异常交易监管阈值/交易限额”表时，数据面板会额外生成标准化的异常交易开仓总量表：直接从既有识别表格的“交易限额”单元格提取品种/合约和单日最大开仓量，再通过前端静态映射补全交易所与代码；原始识别表格仍可展开核对。原图未提供独立预警线，因此当前页面按最大开仓量的 80% 展示预警值。
 10. 识别到“交易所期货/期权限仓”表时，数据面板会额外生成标准化的持仓限仓表：按交易所、品种/合约、持仓日期、总持仓量和固定/百分比限仓规则展开，并把无法映射的品种保留在提示中；原始识别表格仍可展开核对。
+11. 在实体整理表点击“写入数据库”后，后端先校验运行状态、文档哈希、静态代码映射、日期哨兵、数值范围和目标 Oracle 权限；通过后再由用户确认创建草稿临时模板。头表、明细表和梯度表在同一个 Oracle 事务中写入，任一条失败全部回滚；本地 SQLite 保留导入批次和逐行错误审计。
 
 运行产物结构：
 

@@ -9,7 +9,8 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .artifacts import ArtifactStore, record_artifact
@@ -23,7 +24,25 @@ from .contracts import (
 from .config import Settings
 from .diffing import compare_documents
 from .exporters import ExportContext, ExporterRegistry
-from .models import Artifact, DocumentRevision, ImageCandidate, Run, Source, utc_now
+from .models import (
+    Artifact,
+    DatabaseImportBatch,
+    DatabaseImportIssue,
+    DocumentRevision,
+    ImageCandidate,
+    Run,
+    Source,
+    utc_now,
+)
+from .oracle_import import (
+    DatabaseImportRequest,
+    ImportIssue,
+    ImportPlan,
+    OracleImportError,
+    OracleTemplateWriter,
+    OracleWriter,
+    build_import_plan,
+)
 from .scheduling import DEFAULT_SCHEDULE_INTERVAL_MINUTES, create_queued_run, schedule_next_at
 from .url_utils import InvalidSourceUrl, default_source_name, normalize_url, validate_fetch_host
 
@@ -192,10 +211,89 @@ def _raw_envelope(session: Session, run_id: str, store: ArtifactStore) -> tuple[
     return artifact, _read_json(store, artifact.relative_path)
 
 
-def build_router(session_factory: sessionmaker, store: ArtifactStore, settings: Settings | None = None) -> APIRouter:
+def _selected_document(
+    session: Session,
+    run_id: str,
+    view: Literal["recognized", "revised"],
+    store: ArtifactStore,
+) -> tuple[Artifact, dict[str, Any], dict[str, Any], DocumentRevision | None]:
+    raw_artifact, raw_envelope = _raw_envelope(session, run_id, store)
+    envelope = raw_envelope
+    revision = None
+    if view == "revised":
+        revision = session.scalar(select(DocumentRevision).where(DocumentRevision.run_id == run_id).order_by(desc(DocumentRevision.revision_number)))
+        if revision is not None:
+            envelope = _read_json(store, revision.document_path)
+    return raw_artifact, raw_envelope, envelope, revision
+
+
+def _database_import_payload(session: Session, batch: DatabaseImportBatch) -> dict[str, Any]:
+    issues = list(
+        session.scalars(
+            select(DatabaseImportIssue)
+            .where(DatabaseImportIssue.batch_id == batch.id)
+            .order_by(DatabaseImportIssue.entity_index, DatabaseImportIssue.id)
+        )
+    )
+    return {
+        "batch_id": batch.id,
+        "run_id": batch.run_id,
+        "revision_id": batch.revision_id,
+        "view": batch.view,
+        "template_type": batch.template_type,
+        "template_name": batch.template_name,
+        "source_document_sha256": batch.source_document_sha256,
+        "fingerprint": batch.entity_fingerprint,
+        "status": batch.status,
+        "counts": batch.counts,
+        "used_derived_warning": batch.used_derived_warning,
+        "target_template_ids": batch.target_template_ids,
+        "error_message": batch.error_message,
+        "created_at": _iso(batch.created_at),
+        "updated_at": _iso(batch.updated_at),
+        "committed_at": _iso(batch.committed_at),
+        "issues": [
+            {
+                "entity_type": issue.entity_type,
+                "entity_index": issue.entity_index,
+                "field": issue.field,
+                "code": issue.code,
+                "message": issue.message,
+                "source_cells": issue.source_cells,
+            }
+            for issue in issues
+        ],
+    }
+
+
+def _store_database_import_issues(session: Session, batch_id: str, issues: list[ImportIssue]) -> None:
+    session.add_all(
+        [
+            DatabaseImportIssue(
+                id=str(uuid4()),
+                batch_id=batch_id,
+                entity_type=issue.entity_type,
+                entity_index=issue.entity_index,
+                field=issue.field,
+                code=issue.code,
+                message=issue.message,
+                source_cells=issue.source_cells,
+            )
+            for issue in issues
+        ]
+    )
+
+
+def build_router(
+    session_factory: sessionmaker,
+    store: ArtifactStore,
+    settings: Settings | None = None,
+    oracle_writer: OracleWriter | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/api")
     exporters = ExporterRegistry()
     runtime_settings = settings or Settings()
+    database_writer = oracle_writer or OracleTemplateWriter(runtime_settings)
 
     def db() -> Any:
         with session_factory() as session:
@@ -337,21 +435,189 @@ def build_router(session_factory: sessionmaker, store: ArtifactStore, settings: 
         run = session.get(Run, run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
-        raw_artifact, raw_envelope = _raw_envelope(session, run_id, store)
-        envelope = raw_envelope
-        revision = None
-        if view == "revised":
-            revision = session.scalar(select(DocumentRevision).where(DocumentRevision.run_id == run_id).order_by(desc(DocumentRevision.revision_number)))
-            if revision:
-                envelope = _read_json(store, revision.document_path)
+        raw_artifact, raw_envelope, envelope, revision = _selected_document(session, run_id, view, store)
         return {
             "run_id": run_id,
             "view": "revised" if revision else "recognized",
             "recognized_document_sha256": document_sha256(raw_envelope["document"]),
+            "document_sha256": document_sha256(envelope["document"]),
             "revision": _revision_payload(revision),
             "document": envelope["document"],
             "raw_artifact": _artifact_payload(raw_artifact),
         }
+
+    @router.post("/runs/{run_id}/database-import/preflight")
+    def database_import_preflight(run_id: str, body: DatabaseImportRequest, session: Session = Depends(db)) -> dict[str, Any]:
+        run = session.get(Run, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        if run.status != "succeeded":
+            raise HTTPException(status_code=409, detail="only a successful run can be imported")
+
+        _, raw_envelope, envelope, revision = _selected_document(session, run_id, body.view, store)
+        current_document_hash = document_sha256(envelope["document"])
+        if body.document_sha256 != current_document_hash:
+            raise HTTPException(status_code=409, detail="document changed; reload the entity table before importing")
+
+        actual_view = "revised" if revision else "recognized"
+        request = body if body.view == actual_view else body.model_copy(update={"view": actual_view})
+        plan, issues = build_import_plan(run_id, envelope["document"], request, runtime_settings)
+
+        duplicate = session.scalar(
+            select(DatabaseImportBatch)
+            .where(
+                DatabaseImportBatch.run_id == run_id,
+                DatabaseImportBatch.source_document_sha256 == plan.document_sha256,
+                DatabaseImportBatch.template_type == plan.template_type,
+                DatabaseImportBatch.entity_fingerprint == plan.fingerprint,
+            )
+            .order_by(desc(DatabaseImportBatch.created_at))
+        )
+        if duplicate is not None:
+            if duplicate.status == "committed":
+                raise HTTPException(status_code=409, detail="相同运行、文档和实体指纹已经成功导入")
+            if duplicate.status in {"preflight_succeeded", "committing"}:
+                return _database_import_payload(session, duplicate)
+
+        if not issues:
+            target_result = database_writer.preflight(plan)
+            issues.extend(target_result.issues)
+            if target_result.creator_id is not None:
+                plan.creator_id = target_result.creator_id
+
+        if duplicate is not None:
+            duplicate.revision_id = revision.id if revision else None
+            duplicate.view = actual_view
+            duplicate.template_type = plan.template_type
+            duplicate.template_name = plan.template_name
+            duplicate.source_document_sha256 = plan.document_sha256
+            duplicate.entity_fingerprint = plan.fingerprint
+            duplicate.status = "preflight_succeeded" if not issues else "preflight_failed"
+            duplicate.payload = plan.payload()
+            duplicate.counts = plan.counts
+            duplicate.used_derived_warning = plan.used_derived_warning
+            duplicate.target_template_ids = []
+            duplicate.error_message = None
+            duplicate.committed_at = None
+            duplicate.updated_at = utc_now()
+            session.execute(delete(DatabaseImportIssue).where(DatabaseImportIssue.batch_id == duplicate.id))
+            _store_database_import_issues(session, duplicate.id, issues)
+            session.commit()
+            session.refresh(duplicate)
+            return _database_import_payload(session, duplicate)
+
+        batch = DatabaseImportBatch(
+            id=str(uuid4()),
+            run_id=run_id,
+            revision_id=revision.id if revision else None,
+            view=actual_view,
+            template_type=plan.template_type,
+            template_name=plan.template_name,
+            source_document_sha256=plan.document_sha256,
+            entity_fingerprint=plan.fingerprint,
+            status="preflight_succeeded" if not issues else "preflight_failed",
+            payload=plan.payload(),
+            counts=plan.counts,
+            used_derived_warning=plan.used_derived_warning,
+            target_template_ids=[],
+        )
+        session.add(batch)
+        _store_database_import_issues(session, batch.id, issues)
+        try:
+            session.commit()
+        except IntegrityError as error:
+            session.rollback()
+            duplicate = session.scalar(
+                select(DatabaseImportBatch)
+                .where(
+                    DatabaseImportBatch.run_id == run_id,
+                    DatabaseImportBatch.source_document_sha256 == plan.document_sha256,
+                    DatabaseImportBatch.template_type == plan.template_type,
+                    DatabaseImportBatch.entity_fingerprint == plan.fingerprint,
+                )
+                .order_by(desc(DatabaseImportBatch.created_at))
+            )
+            if duplicate is not None:
+                if duplicate.status == "committed":
+                    raise HTTPException(status_code=409, detail="相同运行、文档和实体指纹已经成功导入")
+                return _database_import_payload(session, duplicate)
+            raise HTTPException(status_code=500, detail="无法保存导入审计批次") from error
+        session.refresh(batch)
+        return _database_import_payload(session, batch)
+
+    @router.post("/database-imports/{batch_id}/commit")
+    def database_import_commit(batch_id: str, session: Session = Depends(db)) -> dict[str, Any]:
+        batch = session.get(DatabaseImportBatch, batch_id)
+        if batch is None:
+            raise HTTPException(status_code=404, detail="database import batch not found")
+        if batch.status == "committed":
+            return _database_import_payload(session, batch)
+        if batch.status != "preflight_succeeded":
+            raise HTTPException(status_code=409, detail=f"导入批次当前状态不可提交：{batch.status}")
+
+        run = session.get(Run, batch.run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        if run.status != "succeeded":
+            raise HTTPException(status_code=409, detail="only a successful run can be imported")
+
+        _, raw_envelope, envelope, revision = _selected_document(session, batch.run_id, batch.view, store)
+        current_document_hash = document_sha256(envelope["document"])
+        if current_document_hash != batch.source_document_sha256:
+            issue = ImportIssue(
+                entity_type="batch",
+                entity_index=-1,
+                field="documentSha256",
+                code="document_changed",
+                message="预校验后文档内容发生变化，请重新预校验",
+            )
+            batch.status = "failed"
+            batch.error_message = issue.message
+            _store_database_import_issues(session, batch.id, [issue])
+            session.commit()
+            raise HTTPException(status_code=409, detail=issue.message)
+        if (revision is None) != (batch.revision_id is None) or (revision is not None and revision.id != batch.revision_id):
+            raise HTTPException(status_code=409, detail="文档修订版本发生变化，请重新预校验")
+
+        plan = ImportPlan.from_payload(batch.payload)
+        batch.status = "committing"
+        batch.error_message = None
+        batch.updated_at = utc_now()
+        session.commit()
+
+        try:
+            result = database_writer.write(plan)
+        except OracleImportError as error:
+            session.rollback()
+            failed_batch = session.get(DatabaseImportBatch, batch_id)
+            if failed_batch is not None:
+                failed_batch.status = "rolled_back"
+                failed_batch.error_message = str(error)
+                failed_batch.updated_at = utc_now()
+                session.commit()
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        except Exception as error:
+            session.rollback()
+            failed_batch = session.get(DatabaseImportBatch, batch_id)
+            if failed_batch is not None:
+                failed_batch.status = "rolled_back"
+                failed_batch.error_message = f"数据库导入失败，事务已回滚：{error}"
+                failed_batch.updated_at = utc_now()
+                session.commit()
+            raise HTTPException(status_code=502, detail=f"数据库导入失败，事务已回滚：{error}") from error
+
+        committed_batch = session.get(DatabaseImportBatch, batch_id)
+        if committed_batch is None:
+            raise HTTPException(status_code=500, detail="导入审计批次不存在")
+        committed_batch.status = "committed"
+        committed_batch.target_template_ids = [result.template_id]
+        committed_batch.counts = result.counts
+        committed_batch.error_message = None
+        committed_batch.committed_at = utc_now()
+        committed_batch.updated_at = utc_now()
+        session.commit()
+        session.refresh(committed_batch)
+        return _database_import_payload(session, committed_batch)
 
     @router.put("/runs/{run_id}/revision")
     def save_revision(run_id: str, body: RevisionRequest, session: Session = Depends(db)) -> dict[str, Any]:
