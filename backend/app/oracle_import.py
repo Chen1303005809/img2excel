@@ -10,7 +10,7 @@ from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, create_engine, event, text
 
 from .config import Settings
 
@@ -799,15 +799,22 @@ class OracleTemplateWriter:
         if not self.settings.oracle_database_url:
             raise OracleImportError("Oracle连接未配置，请设置IMAGE_TABLE_ORACLE_DATABASE_URL")
         try:
-            self._engine = create_engine(
+            timeout_seconds = self.settings.oracle_import_timeout_seconds
+            engine = create_engine(
                 self.settings.oracle_database_url,
                 pool_pre_ping=True,
-                pool_timeout=self.settings.oracle_import_timeout_seconds,
+                pool_timeout=timeout_seconds,
                 connect_args={
-                    "tcp_connect_timeout": self.settings.oracle_import_timeout_seconds,
-                    "call_timeout": self.settings.oracle_import_timeout_seconds * 1000,
+                    "tcp_connect_timeout": timeout_seconds,
                 },
             )
+            call_timeout_ms = timeout_seconds * 1000
+
+            def set_call_timeout(dbapi_connection: Any, _connection_record: Any) -> None:
+                dbapi_connection.call_timeout = call_timeout_ms
+
+            event.listen(engine, "connect", set_call_timeout)
+            self._engine = engine
         except Exception as error:
             raise OracleImportError(f"创建Oracle连接失败：{error}") from error
         return self._engine

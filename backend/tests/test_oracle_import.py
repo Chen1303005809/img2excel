@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from backend.app import oracle_import
 from backend.app.artifacts import record_artifact
 from backend.app.config import Settings
 from backend.app.contracts import document_sha256
@@ -242,6 +244,35 @@ def test_f_suffix_product_code_is_accepted_by_database_import():
 
     assert issues == []
     assert plan.position_rows[0]["product_id"] == "V_f"
+
+
+def test_oracle_connect_does_not_receive_call_timeout(monkeypatch):
+    captured: dict[str, object] = {}
+    engine = object()
+
+    def fake_create_engine(_url, **kwargs):
+        if "call_timeout" in kwargs.get("connect_args", {}):
+            raise TypeError("connect() got an unexpected keyword argument 'call_timeout'")
+        captured["kwargs"] = kwargs
+        return engine
+
+    def fake_listen(target, identifier, listener):
+        captured["listener"] = (target, identifier, listener)
+
+    monkeypatch.setattr(oracle_import, "create_engine", fake_create_engine)
+    monkeypatch.setattr(oracle_import.event, "listen", fake_listen)
+
+    writer = oracle_import.OracleTemplateWriter(
+        Settings(oracle_database_url="oracle+oracledb://user:password@localhost:1521/?service_name=XE")
+    )
+
+    assert writer._engine_or_raise() is engine
+    assert captured["kwargs"]["connect_args"] == {"tcp_connect_timeout": 30}
+    _, identifier, listener = captured["listener"]
+    assert identifier == "connect"
+    connection = SimpleNamespace()
+    listener(connection, None)
+    assert connection.call_timeout == 30_000
 
 
 def test_invalid_date_and_warning_stop_before_oracle(tmp_path):
