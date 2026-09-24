@@ -218,6 +218,32 @@ def test_import_mapping_rules_are_strict_and_target_oriented():
     assert open_plan.used_derived_warning is True
 
 
+def test_f_suffix_product_code_is_accepted_by_database_import():
+    settings = Settings(oracle_creator_id=7)
+    request = DatabaseImportRequest(
+        documentSha256="a" * 64,
+        templateType="TEMP_POSITIONLIMIT_DETAIL",
+        positionRows=[
+            {
+                "type": "期货",
+                "exchange": "大连商品交易所",
+                "instrument": "V_f",
+                "productId": "V_f",
+                "direction": "所有",
+                "hedge": "所有",
+                "holdingDate": "合约挂牌至交割月份",
+                "totalPosition": "0<=持仓量<+∞",
+                "limitRule": "固定值1000",
+            }
+        ],
+    )
+
+    plan, issues = build_import_plan("run-f-suffix", {"sections": []}, request, settings)
+
+    assert issues == []
+    assert plan.position_rows[0]["product_id"] == "V_f"
+
+
 def test_invalid_date_and_warning_stop_before_oracle(tmp_path):
     settings = Settings(data_dir=tmp_path, database_url=f"sqlite:///{tmp_path / 'app.db'}")
     fake = FakeOracleWriter()
