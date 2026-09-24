@@ -275,6 +275,33 @@ def test_oracle_connect_does_not_receive_call_timeout(monkeypatch):
     assert connection.call_timeout == 30_000
 
 
+def test_oracle_tns_admin_is_passed_to_driver(monkeypatch):
+    tns_admin = "/tmp/oracle-network-admin"
+    captured: dict[str, object] = {}
+    engine = object()
+    monkeypatch.setenv("TNS_ADMIN", tns_admin)
+
+    def fake_create_engine(_url, **kwargs):
+        connect_args = kwargs.get("connect_args", {})
+        if connect_args.get("config_dir") != tns_admin:
+            raise RuntimeError(
+                "(oracledb.exceptions.DatabaseError) DPY-4027: "
+                "no configuration directory to search for tnsnames.ora"
+            )
+        captured["connect_args"] = connect_args
+        return engine
+
+    monkeypatch.setattr(oracle_import, "create_engine", fake_create_engine)
+    monkeypatch.setattr(oracle_import.event, "listen", lambda *_args: None)
+
+    writer = oracle_import.OracleTemplateWriter(
+        Settings(oracle_database_url="oracle+oracledb://user:password@ORCL")
+    )
+
+    assert writer._engine_or_raise() is engine
+    assert captured["connect_args"]["config_dir"] == tns_admin
+
+
 def test_invalid_date_and_warning_stop_before_oracle(tmp_path):
     settings = Settings(data_dir=tmp_path, database_url=f"sqlite:///{tmp_path / 'app.db'}")
     fake = FakeOracleWriter()

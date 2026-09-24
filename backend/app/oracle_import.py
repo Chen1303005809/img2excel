@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -800,13 +801,20 @@ class OracleTemplateWriter:
             raise OracleImportError("Oracle连接未配置，请设置IMAGE_TABLE_ORACLE_DATABASE_URL")
         try:
             timeout_seconds = self.settings.oracle_import_timeout_seconds
+            connect_args: dict[str, Any] = {
+                "tcp_connect_timeout": timeout_seconds,
+            }
+            if self.settings.oracle_config_dir is not None:
+                connect_args["config_dir"] = str(self.settings.oracle_config_dir.expanduser())
+            else:
+                tns_admin = os.environ.get("TNS_ADMIN", "").strip()
+                if tns_admin:
+                    connect_args["config_dir"] = os.path.expanduser(tns_admin)
             engine = create_engine(
                 self.settings.oracle_database_url,
                 pool_pre_ping=True,
                 pool_timeout=timeout_seconds,
-                connect_args={
-                    "tcp_connect_timeout": timeout_seconds,
-                },
+                connect_args=connect_args,
             )
             call_timeout_ms = timeout_seconds * 1000
 
