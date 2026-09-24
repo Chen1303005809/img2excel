@@ -8,6 +8,8 @@ export interface InstrumentMapping {
   code: string;
   exchange: string;
   aliases: readonly string[];
+  /** Raw exchange prefix used when parsing explicit contract-month codes. */
+  contractCodePrefix?: string;
   optionCode?: string;
 }
 
@@ -44,8 +46,9 @@ export const EXCEPTION_TRADE_HEADERS = [
 
 /**
  * Static product-to-exchange/code dictionary used by the exception monitor.
- * Codes are the exchange trading symbols; contract months are appended when
- * the source cell explicitly lists contracts (for example, AG2607).
+ * Product codes are used by the monitor/import flow; contract months are
+ * appended from the raw exchange prefix when the source lists contracts
+ * explicitly (for example, AG2607).
  */
 export const INSTRUMENT_MAPPINGS: readonly InstrumentMapping[] = [
   // Zhengzhou Commodity Exchange
@@ -75,12 +78,25 @@ export const INSTRUMENT_MAPPINGS: readonly InstrumentMapping[] = [
   { name: "焦煤", code: "JM", exchange: "大连商品交易所", aliases: ["焦煤"] },
   {
     name: "线型低密度聚乙烯月均价",
-    code: "L",
+    code: "L_f",
     exchange: "大连商品交易所",
     aliases: ["线型低密度聚乙烯月均价", "LLDPE月均价"],
+    contractCodePrefix: "L",
   },
-  { name: "聚氯乙烯月均价", code: "V", exchange: "大连商品交易所", aliases: ["聚氯乙烯月均价", "PVC月均价"] },
-  { name: "聚丙烯月均价", code: "PP", exchange: "大连商品交易所", aliases: ["聚丙烯月均价", "PP月均价"] },
+  {
+    name: "聚氯乙烯月均价",
+    code: "V_f",
+    exchange: "大连商品交易所",
+    aliases: ["聚氯乙烯月均价", "PVC月均价"],
+    contractCodePrefix: "V",
+  },
+  {
+    name: "聚丙烯月均价",
+    code: "PP_f",
+    exchange: "大连商品交易所",
+    aliases: ["聚丙烯月均价", "PP月均价"],
+    contractCodePrefix: "PP",
+  },
   { name: "焦炭", code: "J", exchange: "大连商品交易所", aliases: ["焦炭"] },
   { name: "铁矿石", code: "I", exchange: "大连商品交易所", aliases: ["铁矿石"] },
   { name: "液化石油气", code: "PG", exchange: "大连商品交易所", aliases: ["液化石油气", "LPG"] },
@@ -155,6 +171,10 @@ export const INSTRUMENT_MAPPINGS: readonly InstrumentMapping[] = [
 export const STATIC_INSTRUMENT_MAPPING: Readonly<Record<string, InstrumentMapping>> = Object.freeze(
   Object.fromEntries(INSTRUMENT_MAPPINGS.map((item) => [item.name, item])),
 );
+
+export function contractCodePrefixForMapping(mapping: InstrumentMapping): string {
+  return mapping.contractCodePrefix ?? mapping.code;
+}
 
 const EXCHANGE_CODE_BY_NAME: Readonly<Record<string, string>> = Object.freeze({
   "大连商品交易所": "DCE",
@@ -244,7 +264,9 @@ function resolveMappings(text: string): InstrumentMapping[] {
 }
 
 function explicitContractCodes(text: string, mapping: InstrumentMapping, kind: InstrumentKind): string[] {
-  const acceptedPrefixes = [mapping.code, kind === "期权" ? mapping.optionCode : undefined].filter(Boolean).map((item) => item!.toLocaleUpperCase());
+  const acceptedPrefixes = [contractCodePrefixForMapping(mapping), kind === "期权" ? mapping.optionCode : undefined]
+    .filter(Boolean)
+    .map((item) => item!.toLocaleUpperCase());
   if (!acceptedPrefixes.length) return [];
   const codes: string[] = [];
   for (const match of text.matchAll(/([A-Za-z]{1,3}\d{4})/g)) {
@@ -268,7 +290,7 @@ function monthOnlyContractCodes(text: string, mapping: InstrumentMapping): strin
   const codes: string[] = [];
   for (const match of text.matchAll(/期货((?:\d{4}[、,，\s]*)+)/g)) {
     if ((match.index ?? Number.POSITIVE_INFINITY) < mappingPosition) continue;
-    for (const month of match[1].match(/\d{4}/g) ?? []) codes.push(`${mapping.code}${month}`);
+    for (const month of match[1].match(/\d{4}/g) ?? []) codes.push(`${contractCodePrefixForMapping(mapping)}${month}`);
   }
   return [...new Set(codes)];
 }

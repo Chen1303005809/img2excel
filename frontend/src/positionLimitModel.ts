@@ -1,4 +1,4 @@
-import { exchangeCodeForName, INSTRUMENT_MAPPINGS, type InstrumentMapping } from "./exceptionTradeModel";
+import { contractCodePrefixForMapping, exchangeCodeForName, INSTRUMENT_MAPPINGS, type InstrumentMapping } from "./exceptionTradeModel";
 import type { Document, Scalar, SourceCellRef, TableSection } from "./types";
 
 export type PositionLimitInstrumentType = "期货" | "期权";
@@ -303,7 +303,7 @@ function resolveInstrumentCodes(
   if (explicitCodes.length) {
     const mappedCodes = explicitCodes.filter((code) => {
       const prefix = code.replace(/\d{4}$/, "");
-      return POSITION_MAPPINGS.some((mapping) => [mapping.code, mapping.optionCode].filter(Boolean).includes(prefix));
+      return POSITION_MAPPINGS.some((mapping) => [contractCodePrefixForMapping(mapping), mapping.optionCode].filter(Boolean).includes(prefix));
     });
     if (mappedCodes.length) return { codes: mappedCodes, mapped: true };
   }

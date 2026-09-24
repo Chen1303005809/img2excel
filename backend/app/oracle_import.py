@@ -78,6 +78,7 @@ KNOWN_PRODUCT_CODES = frozenset(
         "LH",
         "LR",
         "LU",
+        "L_f",
         "M",
         "MA",
         "NI",
@@ -92,6 +93,7 @@ KNOWN_PRODUCT_CODES = frozenset(
         "PK",
         "PM",
         "PP",
+        "PP_f",
         "PR",
         "PS",
         "PT",
@@ -119,6 +121,7 @@ KNOWN_PRODUCT_CODES = frozenset(
         "TS",
         "UR",
         "V",
+        "V_f",
         "WH",
         "WR",
         "Y",
@@ -502,7 +505,7 @@ def parse_date_rule(value: str) -> PositionDateRule | None:
 
 
 def _valid_instrument_code(value: str) -> bool:
-    return re.fullmatch(r"[A-Z]{1,5}[0-9]{0,8}", value) is not None
+    return re.fullmatch(r"[A-Z]{1,5}(?:_f)?[0-9]{0,8}", value) is not None
 
 
 def _known_instrument_code(value: str) -> bool:
