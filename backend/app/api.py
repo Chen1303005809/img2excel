@@ -9,7 +9,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, desc, select
+from sqlalchemy import delete, desc, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -221,7 +221,14 @@ def _selected_document(
     envelope = raw_envelope
     revision = None
     if view == "revised":
-        revision = session.scalar(select(DocumentRevision).where(DocumentRevision.run_id == run_id).order_by(desc(DocumentRevision.revision_number)))
+        revision = session.scalar(
+            select(DocumentRevision)
+            .where(
+                DocumentRevision.run_id == run_id,
+                DocumentRevision.base_document_sha256 == document_sha256(raw_envelope["document"]),
+            )
+            .order_by(desc(DocumentRevision.revision_number))
+        )
         if revision is not None:
             envelope = _read_json(store, revision.document_path)
     return raw_artifact, raw_envelope, envelope, revision
@@ -407,6 +414,53 @@ def build_router(
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
         return _run_payload(session, run, store)
+
+    @router.post("/runs/{run_id}/rerecognize")
+    def rerecognize_run(run_id: str, session: Session = Depends(db)) -> dict[str, Any]:
+        run = session.get(Run, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        if run.status != "succeeded":
+            raise HTTPException(status_code=409, detail="only a successful run can be re-recognized")
+        if run.lease_id is not None:
+            raise HTTPException(status_code=409, detail="run is still being finalized")
+
+        candidate = session.scalar(
+            select(ImageCandidate).where(ImageCandidate.run_id == run_id, ImageCandidate.selected.is_(True))
+        )
+        if candidate is None or not candidate.local_path:
+            raise HTTPException(status_code=409, detail="the selected source image is not available locally")
+        image_path = store.absolute_path(candidate.local_path)
+        source_artifact = session.scalar(
+            select(Artifact).where(Artifact.run_id == run_id, Artifact.kind == "source_image")
+        )
+        if source_artifact is None or not image_path.is_file():
+            raise HTTPException(status_code=409, detail="the selected source image is not available locally")
+
+        result = session.execute(
+            update(Run)
+            .where(Run.id == run_id, Run.status == "succeeded", Run.lease_id.is_(None))
+            .values(
+                status="queued",
+                stage="queued",
+                progress=0,
+                message="重新识别图片已加入队列",
+                error_code=None,
+                error_message=None,
+                recognition_skipped=False,
+                force_recognition=True,
+                finished_at=None,
+                heartbeat_at=utc_now(),
+            )
+        )
+        if result.rowcount != 1:
+            session.rollback()
+            raise HTTPException(status_code=409, detail="run status changed; reload and try again")
+        session.commit()
+        refreshed = session.get(Run, run_id)
+        if refreshed is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return _run_payload(session, refreshed, store)
 
     @router.post("/runs/{run_id}/image-selection")
     def select_image(run_id: str, body: ImageSelectionRequest, session: Session = Depends(db)) -> dict[str, Any]:

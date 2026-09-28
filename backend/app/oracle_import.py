@@ -473,6 +473,19 @@ def _whole_trading_month_rule(start_month: int, end_month: int) -> PositionDateR
     )
 
 
+def _contract_listing_rule() -> PositionDateRule:
+    return PositionDateRule(
+        startmonth=-1,
+        startday=-1,
+        startdaytype=0,
+        endmonth=-1,
+        endday=-1,
+        enddaytype=0,
+        startordertype=0,
+        endordertype=0,
+    )
+
+
 def _parse_date_endpoint(value: str, *, start: bool) -> dict[str, int] | None:
     text_value = re.sub(r"^(自|从)", "", _compact(value))
     text_value = re.sub(r"期间.*$", "", text_value)
@@ -521,17 +534,13 @@ def _parse_date_endpoint(value: str, *, start: bool) -> dict[str, int] | None:
 
 def parse_date_rule(value: str) -> PositionDateRule | None:
     text_value = _compact(value)
-    if text_value == "合约挂牌至交割月份" or text_value == "合约上市至交割月份":
-        return PositionDateRule(
-            startmonth=-1,
-            startday=-1,
-            startdaytype=0,
-            endmonth=-1,
-            endday=-1,
-            enddaytype=0,
-            startordertype=0,
-            endordertype=0,
-        )
+    if text_value in {
+        "合约挂牌至交割月份",
+        "合约上市至交割月份",
+        "上市首日",
+        "挂牌首日",
+    }:
+        return _contract_listing_rule()
 
     month_period = _delivery_month_period(text_value)
     if month_period is not None:

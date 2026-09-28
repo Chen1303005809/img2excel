@@ -128,13 +128,14 @@ function App() {
   const [selectedRange, setSelectedRange] = useState<CellRange | null>(null);
   const [tablePresentation, setTablePresentation] = useState<TablePresentation>("ocr");
   const [databaseImportLoading, setDatabaseImportLoading] = useState(false);
+  const [rerecognizeLoading, setRerecognizeLoading] = useState(false);
 
   const refreshSources = useCallback(async () => setSources(await api.sources()), []);
   const refreshRuns = useCallback(async () => setRuns(await api.runs(sourceFilter || undefined, statusFilter || undefined)), [sourceFilter, statusFilter]);
 
-  const loadRun = useCallback(async (runId: string) => {
+  const loadRun = useCallback(async (runId: string, resetPresentation = true) => {
     setSelectedRange(null);
-    setTablePresentation("ocr");
+    if (resetPresentation) setTablePresentation("ocr");
     const run = await api.run(runId);
     setSelectedRun(run);
     setSelectedRunId(runId);
@@ -163,7 +164,7 @@ function App() {
   useEffect(() => {
     if (!selectedRunId || !selectedRun || !activeStatuses.has(selectedRun.status)) return;
     const timer = window.setInterval(() => {
-      void Promise.all([loadRun(selectedRunId), refreshRuns(), refreshSources()]).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
+      void Promise.all([loadRun(selectedRunId, false), refreshRuns(), refreshSources()]).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
     }, 1500);
     return () => window.clearInterval(timer);
   }, [loadRun, refreshRuns, refreshSources, selectedRun, selectedRunId]);
@@ -222,6 +223,23 @@ function App() {
       await refreshRuns();
     } catch (error) {
       setNotice({ kind: "error", text: (error as Error).message });
+    }
+  }
+
+  async function rerecognizeImage() {
+    if (!selectedRunId) return;
+    if (isDirty && !window.confirm("重新识别会丢弃当前未保存修改，并基于已保存原图生成新结果。是否继续？")) return;
+    setRerecognizeLoading(true);
+    try {
+      await api.rerecognize(selectedRunId);
+      await loadRun(selectedRunId);
+      setTablePresentation("entity");
+      await Promise.all([refreshRuns(), refreshSources()]);
+      setNotice({ kind: "success", text: "已加入重新识别队列，完成后会更新实体表" });
+    } catch (error) {
+      setNotice({ kind: "error", text: (error as Error).message });
+    } finally {
+      setRerecognizeLoading(false);
     }
   }
 
@@ -411,7 +429,7 @@ function App() {
         </section>
 
         <aside className="detail-column">
-          <RunDetail run={selectedRun} document={document} compare={compare} stats={stats} dirty={isDirty} databaseImportLoading={databaseImportLoading} selectedRange={selectedRange} tablePresentation={tablePresentation} onTablePresentationChange={setTablePresentation} onSelectImage={selectImage} onChangeCell={updateCell} onSelectCell={selectCell} onMerge={mergeSelectedCells} onUnmerge={unmergeSelectedCell} onSave={saveRevision} onExport={exportRun} onDatabaseImport={importDatabase} />
+          <RunDetail run={selectedRun} document={document} compare={compare} stats={stats} dirty={isDirty} databaseImportLoading={databaseImportLoading} rerecognizeLoading={rerecognizeLoading} selectedRange={selectedRange} tablePresentation={tablePresentation} onTablePresentationChange={setTablePresentation} onSelectImage={selectImage} onRerecognize={rerecognizeImage} onChangeCell={updateCell} onSelectCell={selectCell} onMerge={mergeSelectedCells} onUnmerge={unmergeSelectedCell} onSave={saveRevision} onExport={exportRun} onDatabaseImport={importDatabase} />
         </aside>
       </main>
     </div>
@@ -505,12 +523,13 @@ function RunTable({ runs, selectedRunId, onSelect }: { runs: Run[]; selectedRunI
   })}</tbody></table></div>;
 }
 
-function RunDetail({ run, document, compare, stats, dirty, databaseImportLoading, selectedRange, tablePresentation, onTablePresentationChange, onSelectImage, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport, onDatabaseImport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: DocumentStats; dirty: boolean; databaseImportLoading: boolean; selectedRange: CellRange | null; tablePresentation: TablePresentation; onTablePresentationChange: (presentation: TablePresentation) => void; onSelectImage: (candidateId: string) => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: (format: ExportFormat) => void; onDatabaseImport: () => void }) {
+function RunDetail({ run, document, compare, stats, dirty, databaseImportLoading, rerecognizeLoading, selectedRange, tablePresentation, onTablePresentationChange, onSelectImage, onRerecognize, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport, onDatabaseImport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: DocumentStats; dirty: boolean; databaseImportLoading: boolean; rerecognizeLoading: boolean; selectedRange: CellRange | null; tablePresentation: TablePresentation; onTablePresentationChange: (presentation: TablePresentation) => void; onSelectImage: (candidateId: string) => void; onRerecognize: () => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: (format: ExportFormat) => void; onDatabaseImport: () => void }) {
   if (!run) return <section className="panel detail-empty"><div className="empty-illustration">↗</div><h2>选择一次运行</h2><p>从来源页或运行历史中选择记录，这里会显示任务进度、数据表和历史差异。</p></section>;
   const supportsEntityPresentation = Boolean(document && (isPositionLimitDocument(document) || isExceptionMonitoringDocument(document)));
   const showingEntityPresentation = tablePresentation === "entity" && supportsEntityPresentation;
+  const hasSavedSourceImage = run.candidates.some((candidate) => candidate.selected && candidate.downloaded);
   return <>
-    <section className="panel run-card"><div className="run-card-top"><div><p className="eyebrow">RUN DETAIL</p><h2>{run.status === "succeeded" ? (document?.title || "识别结果") : statusText(run.status)}</h2><p className="muted">{formatTime(run.created_at)} · {run.requested_url}</p></div><span className={`status-badge large ${run.status}`}>{statusText(run.status)}</span></div><div className="progress-track large"><span style={{ width: `${run.progress}%` }} /></div><div className="run-message">{run.message}{run.error_message && <span className="error-text">：{run.error_message}</span>}</div>{run.status === "succeeded" && <><div className="stat-row"><Stat label="分区" value={stats.sections} /><Stat label="非空单元格" value={stats.cells} /></div><div className="stat-row confidence-stats" aria-label="不同颜色的识别分数数量"><Stat tone="high" label="高分框" value={stats.confidence.high} /><Stat tone="medium" label="中分框" value={stats.confidence.medium} /><Stat tone="low" label="低分框" value={stats.confidence.low} /><Stat tone="unknown" label="未提供" value={stats.confidence.unknown} /></div></>}{run.status === "succeeded" && <SelectedImageInfo run={run} />}</section>
+    <section className="panel run-card"><div className="run-card-top"><div><p className="eyebrow">RUN DETAIL</p><h2>{run.status === "succeeded" ? (document?.title || "识别结果") : statusText(run.status)}</h2><p className="muted">{formatTime(run.created_at)} · {run.requested_url}</p></div><div className="run-detail-actions">{run.status === "succeeded" && <button type="button" className="quiet" disabled={rerecognizeLoading || !hasSavedSourceImage} title={hasSavedSourceImage ? "从这次运行保存的原图重新识别" : "未找到已保存的原图"} onClick={onRerecognize}>{rerecognizeLoading ? "正在排队…" : "重新识别图片"}</button>}<span className={`status-badge large ${run.status}`}>{statusText(run.status)}</span></div></div><div className="progress-track large"><span style={{ width: `${run.progress}%` }} /></div><div className="run-message">{run.message}{run.error_message && <span className="error-text">：{run.error_message}</span>}</div>{run.status === "succeeded" && <><div className="stat-row"><Stat label="分区" value={stats.sections} /><Stat label="非空单元格" value={stats.cells} /></div><div className="stat-row confidence-stats" aria-label="不同颜色的识别分数数量"><Stat tone="high" label="高分框" value={stats.confidence.high} /><Stat tone="medium" label="中分框" value={stats.confidence.medium} /><Stat tone="low" label="低分框" value={stats.confidence.low} /><Stat tone="unknown" label="未提供" value={stats.confidence.unknown} /></div></>}{run.status === "succeeded" && <SelectedImageInfo run={run} />}</section>
     {run.status === "awaiting_image_selection" && <CandidatePicker candidates={run.candidates} onSelect={onSelectImage} />}
     {run.status === "succeeded" && document && <>
       {(!showingEntityPresentation || !supportsEntityPresentation) && <ComparisonPanel compare={compare} />}

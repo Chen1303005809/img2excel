@@ -290,4 +290,31 @@ describe("position limit table", () => {
       },
     ]);
   });
+
+  it("maps the listed first day to the contract listing rule", () => {
+    const document = fixtureDocument();
+    document.title = "各交易所期货限仓汇编";
+    document.sections = [
+      section("T05", "T05 中国金融期货交易所", [
+        ["", "上市首日", "交割月前一个月下旬第一个交易日起"],
+        ["沪深300指数", "5000", "5000"],
+      ]),
+    ];
+
+    const table = extractPositionLimitTable(document);
+    const listingRow = table.rows.find((row) => row.holdingDate === "上市首日");
+
+    expect(listingRow?.instrument).toBe("IF");
+    expect(listingRow?.limitRule).toBe("固定值5000");
+    expect(listingRow?.dateRule).toEqual({
+      startmonth: -1,
+      startday: -1,
+      startdaytype: 0,
+      endmonth: -1,
+      endday: -1,
+      enddaytype: 0,
+      startordertype: 0,
+      endordertype: 0,
+    });
+  });
 });

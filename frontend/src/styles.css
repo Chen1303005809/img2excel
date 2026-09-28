@@ -23,6 +23,7 @@ h2 { margin-bottom: 8px; font-size: 19px; letter-spacing: -.025em; }
 .panel { padding: 22px; border: 1px solid #e1e6ec; border-radius: 12px; background: #fff; box-shadow: 0 5px 18px rgba(27, 45, 71, .035); }
 .intro-panel { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .panel-heading, .run-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.run-detail-actions { display: flex; align-items: center; gap: 8px; }
 .panel-heading { margin-bottom: 16px; }
 .source-form { display: grid; grid-template-columns: minmax(220px, 1fr) 150px auto; gap: 8px; align-items: center; min-width: 470px; }
 input, textarea { border: 1px solid #d8dee7; border-radius: 7px; outline: none; background: #fcfdfe; color: #1e2b3b; }

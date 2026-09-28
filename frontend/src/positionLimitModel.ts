@@ -500,6 +500,19 @@ function wholeTradingMonthRule(startMonth: number, endMonth: number): PositionDa
   };
 }
 
+function contractListingRule(): PositionDateRule {
+  return {
+    startmonth: -1,
+    startday: -1,
+    startdaytype: 0,
+    endmonth: -1,
+    endday: -1,
+    enddaytype: 0,
+    startordertype: 0,
+    endordertype: 0,
+  };
+}
+
 function parseDateEndpoint(
   value: string,
   start: boolean,
@@ -540,17 +553,9 @@ function parseDateEndpoint(
 function parsePositionDateRule(value: string): PositionDateRule | undefined {
   const text = compact(value);
   if (isCompoundDeliveryMonthLabel(text)) return undefined;
+  if (text === "上市首日" || text === "挂牌首日") return contractListingRule();
   if (text === "合约挂牌至交割月份" || text === "合约上市至交割月份") {
-    return {
-      startmonth: -1,
-      startday: -1,
-      startdaytype: 0,
-      endmonth: -1,
-      endday: -1,
-      enddaytype: 0,
-      startordertype: 0,
-      endordertype: 0,
-    };
+    return contractListingRule();
   }
   const monthPeriod = deliveryMonthPeriod(text);
   if (monthPeriod !== null) {

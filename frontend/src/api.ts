@@ -77,6 +77,7 @@ export const api = {
     return request<Run[]>(`/api/runs?${params.toString()}`);
   },
   run: (id: string) => request<Run>(`/api/runs/${id}`),
+  rerecognize: (id: string) => request<Run>(`/api/runs/${id}/rerecognize`, { method: "POST" }),
   document: (id: string, view: "recognized" | "revised" = "recognized") =>
     request<DocumentResponse>(`/api/runs/${id}/document?view=${view}`),
   compare: (id: string) => request<CompareResult>(`/api/runs/${id}/compare`),

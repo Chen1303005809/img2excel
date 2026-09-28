@@ -54,6 +54,7 @@ class Run(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     comparison_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     recognition_skipped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    force_recognition: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     lease_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

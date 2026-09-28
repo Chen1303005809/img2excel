@@ -231,7 +231,7 @@ class PipelineRunner:
                             candidate.selected = candidate.ordinal == candidates[0].ordinal
                         session.commit()
 
-            await self._extract_and_export(run_id)
+            await self._extract_and_export(run_id, force_recognition=run.force_recognition)
         except PipelineError as error:
             self._fail(run_id, error.code, str(error))
         except SystemExit as error:
@@ -291,7 +291,7 @@ class PipelineRunner:
             session.commit()
             return candidates[0]
 
-    async def _extract_and_export(self, run_id: str) -> None:
+    async def _extract_and_export(self, run_id: str, force_recognition: bool = False) -> None:
         with self.session_factory() as session:
             run = self._get_run(session, run_id)
             candidate = self._selected_candidate(session, run_id)
@@ -333,7 +333,7 @@ class PipelineRunner:
 
         with self.session_factory() as session:
             run = self._get_run(session, run_id)
-        document = self._load_unchanged_document(
+        document = None if force_recognition else self._load_unchanged_document(
             run,
             image_sha,
             expected_extractor_version=getattr(self.extractor, "version", None),
@@ -397,6 +397,7 @@ class PipelineRunner:
             run.message = "图片未变化，已跳过识别并复用结果" if recognition_skipped else "处理完成"
             run.finished_at = utc_now()
             run.heartbeat_at = utc_now()
+            run.force_recognition = False
             session.commit()
 
     def _fail(self, run_id: str, code: str, message: str) -> None:
@@ -408,5 +409,6 @@ class PipelineRunner:
             message="处理失败",
             error_code=code,
             error_message=message,
+            force_recognition=False,
             finished_at=utc_now(),
         )

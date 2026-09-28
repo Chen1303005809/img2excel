@@ -291,6 +291,52 @@ def test_import_mapping_rules_are_strict_and_target_oriented():
     assert open_plan.used_derived_warning is True
 
 
+def test_listing_first_day_heading_maps_to_the_contract_listing_rule():
+    request = DatabaseImportRequest(
+        documentSha256="a" * 64,
+        templateType="TEMP_POSITIONLIMIT_DETAIL",
+        positionRows=[
+            {
+                "type": "期货",
+                "exchange": "中国金融期货交易所",
+                "exchangeCode": "CFFEX",
+                "instrument": "IF",
+                "productId": "IF",
+                "holdingDate": "上市首日",
+                "totalPosition": "0<=持仓量<+∞",
+                "limitRule": "固定值5000",
+            }
+        ],
+    )
+
+    plan, issues = build_import_plan("run-listing-first-day", {"sections": []}, request, Settings())
+
+    assert issues == []
+    assert len(plan.position_rows) == 1
+    assert {
+        key: plan.position_rows[0][key]
+        for key in (
+            "startmonth",
+            "startday",
+            "startdaytype",
+            "endmonth",
+            "endday",
+            "enddaytype",
+            "startordertype",
+            "endordertype",
+        )
+    } == {
+        "startmonth": -1,
+        "startday": -1,
+        "startdaytype": 0,
+        "endmonth": -1,
+        "endday": -1,
+        "enddaytype": 0,
+        "startordertype": 0,
+        "endordertype": 0,
+    }
+
+
 def test_f_suffix_product_code_is_accepted_by_database_import():
     settings = Settings(oracle_creator_id=7)
     request = DatabaseImportRequest(
