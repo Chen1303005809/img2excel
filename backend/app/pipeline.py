@@ -39,6 +39,12 @@ class LocalImageExtractor:
     def __init__(self):
         self._engine = None
 
+    @property
+    def version(self) -> int:
+        from image_to_rows import EXTRACTOR_VERSION
+
+        return EXTRACTOR_VERSION
+
     def extract(self, image_path: Path) -> dict[str, Any]:
         from image_to_rows import create_ocr_engine, extract
 
@@ -154,8 +160,13 @@ class PipelineRunner:
     def _candidates(self, session: Session, run_id: str) -> list[ImageCandidate]:
         return list(session.scalars(select(ImageCandidate).where(ImageCandidate.run_id == run_id).order_by(ImageCandidate.ordinal)))
 
-    def _load_unchanged_document(self, run: Run, image_sha: str) -> dict[str, Any] | None:
-        """Reuse the previous raw OCR document when the selected image is byte-identical."""
+    def _load_unchanged_document(
+        self,
+        run: Run,
+        image_sha: str,
+        expected_extractor_version: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Reuse prior OCR only when both image and local extractor are unchanged."""
         if not run.baseline_run_id or not image_sha:
             return None
 
@@ -172,7 +183,13 @@ class PipelineRunner:
             payload = validate_envelope(json.loads(baseline_path.read_text(encoding="utf-8")))
             if payload.get("image_sha256") != image_sha:
                 return None
-            return validate_document(payload["document"])
+            document = validate_document(payload["document"])
+            if (
+                expected_extractor_version is not None
+                and document.get("metrics", {}).get("extractor_version") != expected_extractor_version
+            ):
+                return None
+            return document
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return None
 
@@ -316,7 +333,11 @@ class PipelineRunner:
 
         with self.session_factory() as session:
             run = self._get_run(session, run_id)
-        document = self._load_unchanged_document(run, image_sha)
+        document = self._load_unchanged_document(
+            run,
+            image_sha,
+            expected_extractor_version=getattr(self.extractor, "version", None),
+        )
         recognition_skipped = document is not None
         if recognition_skipped:
             self._update_run(

@@ -444,12 +444,40 @@ def _delivery_month_period(value: str) -> int | None:
     return _small_chinese_number(match.group("months"))
 
 
+def _delivery_month_periods(value: str) -> list[tuple[str, int | None]]:
+    pattern = re.compile(
+        r"交割月(?:份)?(?:前|之前)第?(?P<months>[0-9一二两三四五六七八九十]+)个?月"
+    )
+    return [
+        (match.group(0), _small_chinese_number(match.group("months")))
+        for match in pattern.finditer(value)
+    ]
+
+
+def _is_compound_delivery_month_label(value: str) -> bool:
+    periods = _delivery_month_periods(_compact(value))
+    return len(periods) > 1 and "".join(label for label, _ in periods) == _compact(value)
+
+
+def _whole_trading_month_rule(start_month: int, end_month: int) -> PositionDateRule:
+    return PositionDateRule(
+        startmonth=start_month,
+        startday=1,
+        startdaytype=0,
+        endmonth=end_month,
+        endday=1,
+        enddaytype=0,
+        startordertype=0,
+        endordertype=1,
+    )
+
+
 def _parse_date_endpoint(value: str, *, start: bool) -> dict[str, int] | None:
     text_value = re.sub(r"^(自|从)", "", _compact(value))
     text_value = re.sub(r"期间.*$", "", text_value)
     text_value = re.sub(r"(起|开始)$", "", text_value)
 
-    if "合约挂牌" in text_value or "合约上市" in text_value:
+    if re.search(r"(?:合约)?(?:挂牌|上市)", text_value):
         return {"month": -1, "day": -1, "daytype": 0, "ordertype": 0}
     if "最后交易日" in text_value and "交割月" not in text_value:
         return {"month": -3, "day": -1, "daytype": 0, "ordertype": 0}
@@ -506,17 +534,8 @@ def parse_date_rule(value: str) -> PositionDateRule | None:
 
     month_period = _delivery_month_period(text_value)
     if month_period is not None:
-        # Month-only columns continue after the previous bucket and span this whole month.
-        return PositionDateRule(
-            startmonth=-2,
-            startday=-2,
-            startdaytype=0,
-            endmonth=month_period,
-            endday=-1,
-            enddaytype=0,
-            startordertype=0,
-            endordertype=0,
-        )
+        # Positive month values identify the month before delivery; -2 is the delivery month sentinel.
+        return _whole_trading_month_rule(month_period, month_period)
 
     if "至" in text_value:
         start_text, end_text = text_value.split("至", 1)
@@ -543,6 +562,12 @@ def parse_date_rule(value: str) -> PositionDateRule | None:
         startordertype=start["ordertype"],
         endordertype=end["ordertype"],
     )
+
+
+def _unknown_position_date_message(value: str) -> str:
+    if _is_compound_delivery_month_label(value):
+        return f"持仓日期包含多个相邻月份标题，疑似列边界未识别；请重新识别或拆分后再导入：{value}"
+    return f"无法严格映射持仓日期：{value}"
 
 
 def _valid_instrument_code(value: str) -> bool:
@@ -627,12 +652,12 @@ def _normalized_position_rows(
         date_rule_valid = date_rule is not None and _valid_date_rule(date_rule)
         if row.date_rule is not None and parsed_date_rule is None:
             date_rule_valid = False
-            issues.append(_issue("position", index, "holdingDate", "unknown_date_rule", f"无法严格映射持仓日期：{row.holding_date}", source_cells))
+            issues.append(_issue("position", index, "holdingDate", "unknown_date_rule", _unknown_position_date_message(row.holding_date), source_cells))
         elif row.date_rule is not None and parsed_date_rule is not None and row.date_rule.model_dump() != parsed_date_rule.model_dump():
             date_rule_valid = False
             issues.append(_issue("position", index, "dateRule", "date_rule_mismatch", "结构化日期规则与日期文本不一致", source_cells))
         if date_rule is None and not row.date_rule:
-            issues.append(_issue("position", index, "holdingDate", "unknown_date_rule", f"无法严格映射持仓日期：{row.holding_date}", source_cells))
+            issues.append(_issue("position", index, "holdingDate", "unknown_date_rule", _unknown_position_date_message(row.holding_date), source_cells))
         elif date_rule is not None and not _valid_date_rule(date_rule):
             issues.append(_issue("position", index, "dateRule", "invalid_date_rule", "结构化日期规则超出允许的哨兵或日期范围", source_cells))
 

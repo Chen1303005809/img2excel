@@ -49,7 +49,18 @@ class ImageToRowsRegressionTests(unittest.TestCase):
         self.assertEqual([section["label"] for section in data["sections"]], expected_labels)
         self.assertEqual(
             [(len(section["cells"]), len(section["x_edges"]) - 1) for section in data["sections"]],
-            [(11, 2), (17, 3), (22, 3), (7, 4), (4, 3), (4, 2)],
+            [(11, 2), (17, 3), (22, 4), (7, 4), (4, 3), (4, 2)],
+        )
+        shfe = data["sections"][2]
+        fuel_oil_option = next(row for row in shfe["cells"] if row[0] == "燃料油期权")
+        self.assertEqual(fuel_oil_option, ["燃料油期权", "7500", "1500", "500"])
+        self.assertEqual(
+            shfe["cells"][19][1:4],
+            [
+                "合约挂牌至交割月前第三月的最后\n个交易日",
+                "交割月前第二月",
+                "交割月前第一月",
+            ],
         )
         empty_merges = [
             merged

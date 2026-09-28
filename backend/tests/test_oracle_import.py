@@ -552,14 +552,14 @@ def test_import_maps_the_date_headings_reported_by_the_option_limit_table():
             "endordertype": 1,
         },
         {
-            "startmonth": -2,
-            "startday": -2,
+            "startmonth": 1,
+            "startday": 1,
             "startdaytype": 0,
             "endmonth": 1,
-            "endday": -1,
+            "endday": 1,
             "enddaytype": 0,
             "startordertype": 0,
-            "endordertype": 0,
+            "endordertype": 1,
         },
         {
             "startmonth": -2,
@@ -572,14 +572,14 @@ def test_import_maps_the_date_headings_reported_by_the_option_limit_table():
             "endordertype": 0,
         },
         {
-            "startmonth": -2,
-            "startday": -2,
+            "startmonth": 2,
+            "startday": 1,
             "startdaytype": 0,
             "endmonth": 2,
-            "endday": -1,
+            "endday": 1,
             "enddaytype": 0,
             "startordertype": 0,
-            "endordertype": 0,
+            "endordertype": 1,
         },
         {
             "startmonth": -1,
@@ -591,6 +591,16 @@ def test_import_maps_the_date_headings_reported_by_the_option_limit_table():
             "startordertype": 0,
             "endordertype": 1,
         },
+        {
+            "startmonth": -1,
+            "startday": -1,
+            "startdaytype": 0,
+            "endmonth": 2,
+            "endday": 1,
+            "enddaytype": 1,
+            "startordertype": 0,
+            "endordertype": 1,
+        },
     ]
     holding_dates = [
         "合约挂牌至交割月前第二月的最后\n个交易日",
@@ -598,6 +608,7 @@ def test_import_maps_the_date_headings_reported_by_the_option_limit_table():
         "交割月",
         "交割月份前第二月",
         "合约挂牌至交割月前第三月的最后一个交易日",
+        "自挂牌至交割月前\n二个月最后一个日\n历日期间的交易日",
     ]
     request = DatabaseImportRequest(
         documentSha256="a" * 64,
@@ -623,13 +634,48 @@ def test_import_maps_the_date_headings_reported_by_the_option_limit_table():
     plan, issues = build_import_plan("run-option-date-rules", {"sections": []}, request, settings)
 
     assert issues == []
+    assert parse_date_rule("合约挂牌至交割月份前第二月的最后一个交易日") == parse_date_rule(
+        "合约挂牌至交割月前第二月的最后一个交易日"
+    )
     assert [
         {key: row[key] for key in ("startmonth", "startday", "endmonth", "endday", "endordertype")}
         for row in plan.position_rows
     ] == [
         {"startmonth": -1, "startday": -1, "endmonth": 2, "endday": 1, "endordertype": 1},
-        {"startmonth": -2, "startday": -2, "endmonth": 1, "endday": -1, "endordertype": 0},
+        {"startmonth": 1, "startday": 1, "endmonth": 1, "endday": 1, "endordertype": 1},
         {"startmonth": -2, "startday": -2, "endmonth": -1, "endday": -1, "endordertype": 0},
-        {"startmonth": -2, "startday": -2, "endmonth": 2, "endday": -1, "endordertype": 0},
+        {"startmonth": 2, "startday": 1, "endmonth": 2, "endday": 1, "endordertype": 1},
         {"startmonth": -1, "startday": -1, "endmonth": 3, "endday": 1, "endordertype": 1},
+        {"startmonth": -1, "startday": -1, "endmonth": 2, "endday": 1, "endordertype": 1},
     ]
+
+
+def test_compound_month_heading_is_rejected_as_a_merged_column_label():
+    settings = Settings(oracle_creator_id=7)
+    holding_date = "交割月前第二月交割月前第一月"
+    request = DatabaseImportRequest(
+        documentSha256="a" * 64,
+        templateType="TEMP_POSITIONLIMIT_DETAIL",
+        positionRows=[
+            {
+                "type": "期权",
+                "exchange": "上海期货交易所",
+                "exchangeCode": "SHFE",
+                "instrument": "FU",
+                "productId": "FU",
+                "direction": "所有",
+                "hedge": "所有",
+                "holdingDate": holding_date,
+                "totalPosition": "0<=持仓量<+∞",
+                "limitRule": "固定值1500500",
+            }
+        ],
+    )
+
+    plan, issues = build_import_plan("run-compound-date-label", {"sections": []}, request, settings)
+
+    assert plan.position_rows == []
+    assert len(issues) == 1
+    assert issues[0].field == "holdingDate"
+    assert "多个相邻月份标题" in issues[0].message
+    assert parse_date_rule(holding_date) is None

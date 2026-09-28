@@ -34,6 +34,9 @@ from rapidocr import RapidOCR
 OCR_DEVICE_ENV = "IMAGE_TABLE_OCR_DEVICE"
 OCR_MODEL_ROOT_DIR_ENV = "IMAGE_TABLE_OCR_MODEL_ROOT_DIR"
 OCR_CUDA_DEVICE_ID_ENV = "IMAGE_TABLE_OCR_CUDA_DEVICE_ID"
+# Bump when OCR geometry or cell reconstruction changes so unchanged images
+# are reprocessed instead of silently reusing stale recognized documents.
+EXTRACTOR_VERSION = 3
 
 
 def _ocr_device() -> str:
@@ -481,6 +484,89 @@ def locate_cell(cx: float, cy: float, x_edges: list[int], y_edges: list[int]) ->
     column = int(np.searchsorted(x_edges, cx, side="right") - 1)
     row = int(np.searchsorted(y_edges, cy, side="right") - 1)
     return max(0, min(column, len(x_edges) - 2)), max(0, min(row, len(y_edges) - 2))
+
+
+def recover_partial_column_edges(
+    x_edges: list[int],
+    y_edges: list[int],
+    items: list[dict[str, Any]],
+    gray: np.ndarray,
+    vertical_mask: np.ndarray,
+) -> list[int]:
+    """Recover a local table divider missed by the full-section grid projection.
+
+    A vertical rule may only span a later subtable, so its projection can fall
+    below ``axis_edges``' whole-section threshold.  Separate OCR boxes on the
+    same baseline provide candidate gaps; only repeated gaps backed by a real
+    vertical rule are promoted to column edges.
+    """
+    cell_items: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for item in items:
+        column, row = locate_cell(item["cx"], item["cy"], x_edges, y_edges)
+        cell_items.setdefault((column, row), []).append(item)
+
+    gaps_by_column: dict[int, list[tuple[tuple[int, int], float, float]]] = {}
+    for (column, row), row_items in cell_items.items():
+        lines: list[list[dict[str, Any]]] = []
+        for item in sorted(row_items, key=lambda candidate: (candidate["cy"], candidate["cx"])):
+            for line in lines:
+                center_y = sum(part["cy"] for part in line) / len(line)
+                tolerance = max(4.0, min(12.0, item["h"] * 0.65))
+                if abs(item["cy"] - center_y) <= tolerance:
+                    line.append(item)
+                    break
+            else:
+                lines.append([item])
+
+        for line_index, line in enumerate(lines):
+            ordered = sorted(line, key=lambda candidate: candidate["x"])
+            for left, right in zip(ordered, ordered[1:]):
+                gap_left = float(left["x"] + left["w"])
+                gap_right = float(right["x"])
+                minimum_gap = max(8.0, min(left["h"], right["h"]) * 0.4)
+                if gap_right - gap_left < minimum_gap:
+                    continue
+                line_key = (row, line_index)
+                gaps_by_column.setdefault(column, []).append((line_key, gap_left, gap_right))
+
+    inferred_edges: list[int] = []
+    minimum_cell_width = max(12, int(round(gray.shape[1] * 0.02)))
+    for column, gaps in gaps_by_column.items():
+        column_left, column_right = x_edges[column], x_edges[column + 1]
+        for seed in sorted(gaps, key=lambda gap: gap[2] - gap[1]):
+            intersect_left, intersect_right = seed[1], seed[2]
+            supporting_lines = {seed[0]}
+            for other in sorted(gaps, key=lambda gap: gap[2] - gap[1]):
+                if other[0] in supporting_lines:
+                    continue
+                next_left = max(intersect_left, other[1])
+                next_right = min(intersect_right, other[2])
+                if next_right - next_left >= 3:
+                    intersect_left, intersect_right = next_left, next_right
+                    supporting_lines.add(other[0])
+            if len(supporting_lines) < 2:
+                continue
+
+            candidates = [
+                x
+                for x in range(int(np.ceil(intersect_left)), int(np.floor(intersect_right)) + 1)
+                if x - column_left >= minimum_cell_width
+                and column_right - x >= minimum_cell_width
+                and _vertical_rule_is_real(gray, x)
+            ]
+            if not candidates:
+                continue
+            edge = max(
+                candidates,
+                key=lambda x: (
+                    int((vertical_mask[:, max(0, x - 1) : min(vertical_mask.shape[1], x + 2)] > 0).sum()),
+                    -abs(x - (intersect_left + intersect_right) / 2),
+                ),
+            )
+            if all(abs(edge - previous) > 3 for previous in inferred_edges):
+                inferred_edges.append(edge)
+
+    return merge_near([*x_edges, *inferred_edges], distance=3)
 
 
 def horizontal_present(
@@ -1199,6 +1285,9 @@ def extract(input_path: Path, engine: RapidOCR | None = None) -> dict[str, Any]:
         horizontal_mask, vertical_mask = line_masks(local_gray)
         grid_ok = len(x_edges) >= 3 and len(y_edges) >= 3
         if grid_ok:
+            x_edges = recover_partial_column_edges(
+                x_edges, y_edges, local_items, local_gray, vertical_mask
+            )
             cells, merged_cells = build_merged_cells(
                 local_gray, x_edges, y_edges, local_items, horizontal_mask, vertical_mask
             )
@@ -1294,6 +1383,7 @@ def extract(input_path: Path, engine: RapidOCR | None = None) -> dict[str, Any]:
         "ocr_boxes": all_boxes,
         "corrections": corrections,
         "metrics": {
+            "extractor_version": EXTRACTOR_VERSION,
             "section_count": len(sections),
             "ocr_box_count": len(all_boxes),
             "ocr_avg_score": round(float(np.mean([item["score"] for item in all_boxes])), 4) if all_boxes else None,

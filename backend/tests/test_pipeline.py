@@ -51,6 +51,10 @@ class SequenceExtractor:
         return deepcopy(self.documents.pop(0))
 
 
+class VersionedSequenceExtractor(SequenceExtractor):
+    version = 3
+
+
 class FakeDownloader:
     def __init__(self, contents: list[bytes] | None = None):
         self.contents = contents or [b"fake-image"]
@@ -163,6 +167,28 @@ async def test_pipeline_skips_ocr_when_image_sha_is_unchanged(db_env):
         assert "跳过识别" in persisted.message
         candidate = session.query(ImageCandidate).filter_by(run_id=second_run.id, selected=True).one()
         assert candidate.sha256 == session.query(ImageCandidate).filter_by(run_id=first_run.id, selected=True).one().sha256
+    assert len(extractor.paths) == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_reprocesses_unchanged_image_when_extractor_version_changes(db_env):
+    candidates = (ImageCandidateData("/source.png", "https://example.com/source.png", 0, "表格", 800, 300),)
+    crawler = FakeCrawler(candidates)
+    first_runner = _runner(db_env, crawler, SequenceExtractor([make_document("100")]), FakeDownloader([b"stable-image"]))
+    _, first_run = _create_source_and_run(db_env[2])
+    await first_runner.process(first_run.id)
+
+    extractor = VersionedSequenceExtractor([make_document("200")])
+    second_runner = _runner(db_env, crawler, extractor, FakeDownloader([b"stable-image"]))
+    _, second_run = _create_source_and_run(db_env[2], source_id=first_run.source_id, baseline_run_id=first_run.id)
+    await second_runner.process(second_run.id)
+
+    with db_env[2]() as session:
+        persisted = session.get(Run, second_run.id)
+        assert persisted is not None
+        assert persisted.status == "succeeded"
+        assert persisted.recognition_skipped is False
+        assert "跳过识别" not in persisted.message
     assert len(extractor.paths) == 1
 
 

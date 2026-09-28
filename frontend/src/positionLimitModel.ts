@@ -463,12 +463,31 @@ function deliveryMonthPeriod(value: string): number | null {
   return match ? smallChineseNumber(match[1]) : null;
 }
 
+function isCompoundDeliveryMonthLabel(value: string): boolean {
+  const text = compact(value);
+  const periods = [...text.matchAll(/交割月(?:份)?(?:前|之前)第?[0-9一二两三四五六七八九十]+个?月/g)];
+  return periods.length > 1 && periods.map((match) => match[0]).join("") === text;
+}
+
+function wholeTradingMonthRule(startMonth: number, endMonth: number): PositionDateRule {
+  return {
+    startmonth: startMonth,
+    startday: 1,
+    startdaytype: 0,
+    endmonth: endMonth,
+    endday: 1,
+    enddaytype: 0,
+    startordertype: 0,
+    endordertype: 1,
+  };
+}
+
 function parseDateEndpoint(
   value: string,
   start: boolean,
 ): { month: number; day: number; daytype: 0 | 1; ordertype: 0 | 1 } | null {
   let text = compact(value).replace(/^(自|从)/, "").replace(/期间.*$/, "").replace(/(起|开始)$/, "");
-  if (text.includes("合约挂牌") || text.includes("合约上市")) {
+  if (/(?:合约)?(?:挂牌|上市)/.test(text)) {
     return { month: -1, day: -1, daytype: 0, ordertype: 0 };
   }
   if (text.includes("最后交易日") && !text.includes("交割月")) {
@@ -502,6 +521,7 @@ function parseDateEndpoint(
 
 function parsePositionDateRule(value: string): PositionDateRule | undefined {
   const text = compact(value);
+  if (isCompoundDeliveryMonthLabel(text)) return undefined;
   if (text === "合约挂牌至交割月份" || text === "合约上市至交割月份") {
     return {
       startmonth: -1,
@@ -516,17 +536,8 @@ function parsePositionDateRule(value: string): PositionDateRule | undefined {
   }
   const monthPeriod = deliveryMonthPeriod(text);
   if (monthPeriod !== null) {
-    // Month-only columns continue after the previous bucket and span this whole month.
-    return {
-      startmonth: -2,
-      startday: -2,
-      startdaytype: 0,
-      endmonth: monthPeriod,
-      endday: -1,
-      enddaytype: 0,
-      startordertype: 0,
-      endordertype: 0,
-    };
+    // Positive month values identify the month before delivery; -2 is the delivery month sentinel.
+    return wholeTradingMonthRule(monthPeriod, monthPeriod);
   }
   let start: ReturnType<typeof parseDateEndpoint>;
   let end: ReturnType<typeof parseDateEndpoint>;
@@ -591,6 +602,7 @@ function makePositionRow(
 
 function normalizeDateLabel(value: string): string {
   let text = compact(value);
+  text = text.replace(/交割月份/g, "交割月").replace(/最后个/g, "最后一个");
   text = text.replace(/^自(?=合约)/, "");
   text = text.replace(/交割月[（(]自然人客户限仓为0[）)]/g, "交割月");
   text = text.replace(/交割月份[（(]自然人客户限仓为0[）)]/g, "交割月份");
