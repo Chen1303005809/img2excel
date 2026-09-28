@@ -11,14 +11,23 @@ export interface DatabaseImportIssue {
   field: string;
   code: string;
   message: string;
-  source_cells: { sectionId: string; row: number; column: number }[];
+  source_cells: { sectionId: string; row: number; column: number; sourceRunId?: string }[];
+}
+
+export interface DatabaseImportSourceDocument {
+  run_id: string;
+  source_name: string;
+  view: "recognized" | "revised";
+  document_sha256: string;
+  revision_id: string | null;
 }
 
 export interface DatabaseImportResult {
   batch_id: string;
   run_id: string;
   revision_id: string | null;
-  view: "recognized" | "revised";
+  view: "recognized" | "revised" | "combined";
+  source_documents: DatabaseImportSourceDocument[];
   template_type: DatabaseImportTemplateType;
   template_name: string;
   source_document_sha256: string;
@@ -42,6 +51,7 @@ export interface DatabaseImportRequest {
   exceptionRows?: ExceptionTradeRow[];
   unmappedCells?: string[];
   unmappedLimitCells?: string[];
+  sourceDocuments?: { runId: string; view: "recognized" | "revised"; documentSha256: string }[];
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -71,7 +81,7 @@ export const api = {
   createRun: (sourceId: string) =>
     request<Run>(`/api/sources/${sourceId}/runs`, { method: "POST" }),
   runs: (sourceId?: string, status?: string) => {
-    const params = new URLSearchParams({ limit: "100" });
+    const params = new URLSearchParams({ limit: "200" });
     if (sourceId) params.set("source_id", sourceId);
     if (status) params.set("status", status);
     return request<Run[]>(`/api/runs?${params.toString()}`);

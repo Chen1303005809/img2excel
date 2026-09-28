@@ -51,6 +51,16 @@ function statusText(status: string): string {
   return labels[status] ?? status;
 }
 
+type PositionLimitSourceKind = "future" | "option";
+
+function positionLimitSourceKind(run: Pick<Run, "source_name" | "requested_url">): PositionLimitSourceKind | null {
+  const sourceName = run.source_name.replace(/[\s\u3000]/g, "");
+  const url = run.requested_url;
+  if (sourceName.includes("期权限仓") || /[?&]id=805(?:[&#]|$)/.test(url)) return "option";
+  if (sourceName.includes("期货限仓") || /[?&]id=804(?:[&#]|$)/.test(url)) return "future";
+  return null;
+}
+
 function comparisonCount(summary: Run["comparison_summary"]): number {
   if (!summary) return 0;
   return summary.changed_cells + summary.added_cells + summary.removed_cells + summary.added_sections + summary.removed_sections + summary.merge_changes + summary.dimension_changes;
@@ -111,6 +121,7 @@ function App() {
   const [view, setView] = useState<View>("sources");
   const [sources, setSources] = useState<Source[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [successfulRuns, setSuccessfulRuns] = useState<Run[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRun, setSelectedRun] = useState<Run | null>(null);
   const [document, setDocument] = useState<Document | null>(null);
@@ -129,9 +140,12 @@ function App() {
   const [tablePresentation, setTablePresentation] = useState<TablePresentation>("ocr");
   const [databaseImportLoading, setDatabaseImportLoading] = useState(false);
   const [rerecognizeLoading, setRerecognizeLoading] = useState(false);
+  const [positionLimitPartnerRunId, setPositionLimitPartnerRunId] = useState("");
+  const positionLimitPartnerPrimaryRunId = useRef<string | null>(null);
 
   const refreshSources = useCallback(async () => setSources(await api.sources()), []);
   const refreshRuns = useCallback(async () => setRuns(await api.runs(sourceFilter || undefined, statusFilter || undefined)), [sourceFilter, statusFilter]);
+  const refreshSuccessfulRuns = useCallback(async () => setSuccessfulRuns(await api.runs(undefined, "succeeded")), []);
 
   const loadRun = useCallback(async (runId: string, resetPresentation = true) => {
     setSelectedRange(null);
@@ -158,16 +172,16 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void Promise.all([refreshSources(), refreshRuns()]).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
-  }, [refreshRuns, refreshSources]);
+    void Promise.all([refreshSources(), refreshRuns(), refreshSuccessfulRuns()]).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
+  }, [refreshRuns, refreshSources, refreshSuccessfulRuns]);
 
   useEffect(() => {
     if (!selectedRunId || !selectedRun || !activeStatuses.has(selectedRun.status)) return;
     const timer = window.setInterval(() => {
-      void Promise.all([loadRun(selectedRunId, false), refreshRuns(), refreshSources()]).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
+      void Promise.all([loadRun(selectedRunId, false), refreshRuns(), refreshSources(), refreshSuccessfulRuns()]).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
     }, 1500);
     return () => window.clearInterval(timer);
-  }, [loadRun, refreshRuns, refreshSources, selectedRun, selectedRunId]);
+  }, [loadRun, refreshRuns, refreshSources, refreshSuccessfulRuns, selectedRun, selectedRunId]);
 
   async function addSource(event: FormEvent) {
     event.preventDefault();
@@ -188,7 +202,7 @@ function App() {
   async function runSource(source: Source) {
     try {
       const run = await api.createRun(source.id);
-      await Promise.all([refreshRuns(), loadRun(run.id)]);
+      await Promise.all([refreshRuns(), refreshSuccessfulRuns(), loadRun(run.id)]);
       setView("runs");
       setNotice({ kind: "success", text: "任务已加入队列" });
     } catch (error) {
@@ -266,7 +280,7 @@ function App() {
   }
 
   async function importDatabase() {
-    if (!selectedRunId || !document || !documentHash) return;
+    if (!selectedRunId || !selectedRun || !document || !documentHash) return;
     if (isDirty) {
       setNotice({ kind: "error", text: "当前有未保存修订，请先保存修订后再写入数据库" });
       return;
@@ -274,26 +288,79 @@ function App() {
     const positionTable = isPositionLimitDocument(document) ? extractPositionLimitTable(document) : null;
     const exceptionTable = !positionTable && isExceptionMonitoringDocument(document) ? extractExceptionTradeTable(document) : null;
     if (!positionTable && !exceptionTable) {
-      setNotice({ kind: "error", text: "当前文档不是可导入的期权限仓或开仓总量实体表" });
+      setNotice({ kind: "error", text: "当前文档不是可导入的持仓限仓或开仓总量实体表" });
       return;
     }
 
-    const templateType: DatabaseImportTemplateType = positionTable ? "TEMP_POSITIONLIMIT_DETAIL" : "TEMP_OPENTOTALLIMIT";
     setDatabaseImportLoading(true);
     try {
+      let positionRows: PositionLimitRow[] | undefined;
+      let sourceDocuments: { runId: string; view: "recognized" | "revised"; documentSha256: string }[] | undefined;
+      let unmappedCells = positionTable?.unmappedCells;
+      let importSourceLabel = selectedRun.source_name;
+      if (positionTable) {
+        const partnerRun = positionLimitPartnerRuns.find((run) => run.id === positionLimitPartnerRunId);
+        if (!partnerRun) {
+          setNotice({ kind: "error", text: "请先选择另一类限仓来源的成功运行，期货与期权需要合并后写入同一模板" });
+          return;
+        }
+        let partnerDocument: Awaited<ReturnType<typeof api.document>>;
+        try {
+          partnerDocument = await api.document(partnerRun.id, "revised");
+        } catch (error) {
+          setNotice({ kind: "error", text: `无法读取配对来源“${partnerRun.source_name}”：${(error as Error).message}` });
+          return;
+        }
+        const partnerTable = isPositionLimitDocument(partnerDocument.document) ? extractPositionLimitTable(partnerDocument.document) : null;
+        if (!partnerTable) {
+          setNotice({ kind: "error", text: `所选运行“${partnerRun.source_name}”不是可导入的持仓限仓表` });
+          return;
+        }
+        positionRows = [
+          ...positionTable.rows.map((row) => ({ ...row, sourceRunId: selectedRunId })),
+          ...partnerTable.rows.map((row) => ({ ...row, sourceRunId: partnerRun.id })),
+        ];
+        const includedTypes = new Set(positionRows.map((row) => row.type));
+        if (!includedTypes.has("期货") || !includedTypes.has("期权")) {
+          setNotice({ kind: "error", text: "合并结果没有同时包含期货与期权限仓，请检查所选的两次运行" });
+          return;
+        }
+        sourceDocuments = [
+          {
+            runId: selectedRunId,
+            view: revisionId ? "revised" : "recognized",
+            documentSha256: documentHash,
+          },
+          {
+            runId: partnerRun.id,
+            view: partnerDocument.view,
+            documentSha256: partnerDocument.document_sha256,
+          },
+        ];
+        unmappedCells = [
+          ...positionTable.unmappedCells.map((cell) => `${selectedRun.source_name}：${cell}`),
+          ...partnerTable.unmappedCells.map((cell) => `${partnerRun.source_name}：${cell}`),
+        ];
+        importSourceLabel = `${selectedRun.source_name} + ${partnerRun.source_name}`;
+      }
+
+      const templateType: DatabaseImportTemplateType = positionTable ? "TEMP_POSITIONLIMIT_DETAIL" : "TEMP_OPENTOTALLIMIT";
       const preflight = await api.preflightDatabaseImport(selectedRunId, {
         view: revisionId ? "revised" : "recognized",
         documentSha256: documentHash,
         templateType,
-        positionRows: positionTable?.rows,
+        positionRows,
         exceptionRows: exceptionTable?.rows,
-        unmappedCells: positionTable?.unmappedCells,
+        unmappedCells,
         unmappedLimitCells: exceptionTable?.unmappedLimitCells,
+        sourceDocuments,
       });
       if (preflight.status !== "preflight_succeeded") {
         const firstIssues = preflight.issues.slice(0, 3).map((issue) => {
           const rowLabel = issue.entity_index >= 0 ? `第${issue.entity_index + 1}行` : "批次";
-          const sourceLabel = issue.source_cells.length ? `（来源 ${issue.source_cells[0].sectionId}[${issue.source_cells[0].row},${issue.source_cells[0].column}]）` : "";
+          const sourceCell = issue.source_cells[0];
+          const sourceName = sourceCell?.sourceRunId ? preflight.source_documents.find((source) => source.run_id === sourceCell.sourceRunId)?.source_name : undefined;
+          const sourceLabel = sourceCell ? `（${sourceName ? `${sourceName} · ` : ""}${sourceCell.sectionId}[${sourceCell.row},${sourceCell.column}]）` : "";
           return `${rowLabel} ${issue.field}：${issue.message}${sourceLabel}`;
         }).join("；");
         setNotice({ kind: "error", text: `预校验未通过（${preflight.issues.length}项）：${firstIssues || "请查看后端审计详情"}` });
@@ -301,8 +368,8 @@ function App() {
       }
 
       const totalRows = preflight.counts.total_rows ?? 0;
-      const targetName = templateType === "TEMP_POSITIONLIMIT_DETAIL" ? "期权限仓" : "开仓总量限制";
-      if (!window.confirm(`预校验通过，将创建 Oracle 草稿模板“${preflight.template_name}”，类型：${targetName}，写入 ${totalRows} 条明细。确认提交吗？`)) {
+      const targetName = templateType === "TEMP_POSITIONLIMIT_DETAIL" ? "期货+期权限仓" : "开仓总量限制";
+      if (!window.confirm(`预校验通过，将创建一个 Oracle 草稿模板“${preflight.template_name}”，类型：${targetName}；来源：${importSourceLabel}；写入 ${totalRows} 条明细。确认提交吗？`)) {
         setNotice({ kind: "success", text: "预校验已通过，已取消本次提交；可再次点击写入数据库继续提交" });
         return;
       }
@@ -382,6 +449,30 @@ function App() {
   }
 
   const stats = useMemo(() => documentStats(document), [document]);
+  const positionLimitPartnerRuns = useMemo(() => {
+    if (!selectedRun) return [];
+    const currentKind = positionLimitSourceKind(selectedRun);
+    if (!currentKind) return [];
+    const partnerKind: PositionLimitSourceKind = currentKind === "future" ? "option" : "future";
+    return successfulRuns
+      .filter((run) => run.status === "succeeded" && run.source_id !== selectedRun.source_id && positionLimitSourceKind(run) === partnerKind)
+      .sort((left, right) => right.created_at.localeCompare(left.created_at));
+  }, [successfulRuns, selectedRun]);
+
+  useEffect(() => {
+    if (!selectedRunId) {
+      positionLimitPartnerPrimaryRunId.current = null;
+      setPositionLimitPartnerRunId("");
+      return;
+    }
+    if (positionLimitPartnerPrimaryRunId.current !== selectedRunId) {
+      positionLimitPartnerPrimaryRunId.current = selectedRunId;
+      setPositionLimitPartnerRunId(positionLimitPartnerRuns[0]?.id ?? "");
+      return;
+    }
+    setPositionLimitPartnerRunId((current) => positionLimitPartnerRuns.some((run) => run.id === current) ? current : positionLimitPartnerRuns[0]?.id ?? "");
+  }, [positionLimitPartnerRuns, selectedRunId]);
+
   const isDirty = useMemo(
     () => Boolean(document && savedDocument && JSON.stringify(document) !== JSON.stringify(savedDocument)),
     [document, savedDocument],
@@ -429,7 +520,7 @@ function App() {
         </section>
 
         <aside className="detail-column">
-          <RunDetail run={selectedRun} document={document} compare={compare} stats={stats} dirty={isDirty} databaseImportLoading={databaseImportLoading} rerecognizeLoading={rerecognizeLoading} selectedRange={selectedRange} tablePresentation={tablePresentation} onTablePresentationChange={setTablePresentation} onSelectImage={selectImage} onRerecognize={rerecognizeImage} onChangeCell={updateCell} onSelectCell={selectCell} onMerge={mergeSelectedCells} onUnmerge={unmergeSelectedCell} onSave={saveRevision} onExport={exportRun} onDatabaseImport={importDatabase} />
+          <RunDetail run={selectedRun} document={document} compare={compare} stats={stats} dirty={isDirty} databaseImportLoading={databaseImportLoading} rerecognizeLoading={rerecognizeLoading} selectedRange={selectedRange} tablePresentation={tablePresentation} positionLimitPartnerRuns={positionLimitPartnerRuns} positionLimitPartnerRunId={positionLimitPartnerRunId} onPositionLimitPartnerChange={setPositionLimitPartnerRunId} onTablePresentationChange={setTablePresentation} onSelectImage={selectImage} onRerecognize={rerecognizeImage} onChangeCell={updateCell} onSelectCell={selectCell} onMerge={mergeSelectedCells} onUnmerge={unmergeSelectedCell} onSave={saveRevision} onExport={exportRun} onDatabaseImport={importDatabase} />
         </aside>
       </main>
     </div>
@@ -523,9 +614,33 @@ function RunTable({ runs, selectedRunId, onSelect }: { runs: Run[]; selectedRunI
   })}</tbody></table></div>;
 }
 
-function RunDetail({ run, document, compare, stats, dirty, databaseImportLoading, rerecognizeLoading, selectedRange, tablePresentation, onTablePresentationChange, onSelectImage, onRerecognize, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport, onDatabaseImport }: { run: Run | null; document: Document | null; compare: CompareResult | null; stats: DocumentStats; dirty: boolean; databaseImportLoading: boolean; rerecognizeLoading: boolean; selectedRange: CellRange | null; tablePresentation: TablePresentation; onTablePresentationChange: (presentation: TablePresentation) => void; onSelectImage: (candidateId: string) => void; onRerecognize: () => void; onChangeCell: (sectionId: string, row: number, column: number, value: string) => void; onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void; onMerge: () => void; onUnmerge: () => void; onSave: () => void; onExport: (format: ExportFormat) => void; onDatabaseImport: () => void }) {
+function RunDetail({ run, document, compare, stats, dirty, databaseImportLoading, rerecognizeLoading, selectedRange, tablePresentation, positionLimitPartnerRuns, positionLimitPartnerRunId, onPositionLimitPartnerChange, onTablePresentationChange, onSelectImage, onRerecognize, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport, onDatabaseImport }: {
+  run: Run | null;
+  document: Document | null;
+  compare: CompareResult | null;
+  stats: DocumentStats;
+  dirty: boolean;
+  databaseImportLoading: boolean;
+  rerecognizeLoading: boolean;
+  selectedRange: CellRange | null;
+  tablePresentation: TablePresentation;
+  positionLimitPartnerRuns: Run[];
+  positionLimitPartnerRunId: string;
+  onPositionLimitPartnerChange: (runId: string) => void;
+  onTablePresentationChange: (presentation: TablePresentation) => void;
+  onSelectImage: (candidateId: string) => void;
+  onRerecognize: () => void;
+  onChangeCell: (sectionId: string, row: number, column: number, value: string) => void;
+  onSelectCell: (sectionId: string, row: number, column: number, extend: boolean) => void;
+  onMerge: () => void;
+  onUnmerge: () => void;
+  onSave: () => void;
+  onExport: (format: ExportFormat) => void;
+  onDatabaseImport: () => void;
+}) {
   if (!run) return <section className="panel detail-empty"><div className="empty-illustration">↗</div><h2>选择一次运行</h2><p>从来源页或运行历史中选择记录，这里会显示任务进度、数据表和历史差异。</p></section>;
   const supportsEntityPresentation = Boolean(document && (isPositionLimitDocument(document) || isExceptionMonitoringDocument(document)));
+  const showsPositionLimitPartnerPicker = Boolean(document && isPositionLimitDocument(document));
   const showingEntityPresentation = tablePresentation === "entity" && supportsEntityPresentation;
   const hasSavedSourceImage = run.candidates.some((candidate) => candidate.selected && candidate.downloaded);
   return <>
@@ -533,7 +648,33 @@ function RunDetail({ run, document, compare, stats, dirty, databaseImportLoading
     {run.status === "awaiting_image_selection" && <CandidatePicker candidates={run.candidates} onSelect={onSelectImage} />}
     {run.status === "succeeded" && document && <>
       {(!showingEntityPresentation || !supportsEntityPresentation) && <ComparisonPanel compare={compare} />}
-      <section className={`panel data-panel ${showingEntityPresentation ? "entity-data-panel" : ""}`}><div className="panel-heading"><div><p className="eyebrow">DATA PANEL</p><h2>{showingEntityPresentation ? "实体整理表" : "OCR 识别结果"} {dirty && <span className="unsaved-badge">有未保存修改</span>}</h2><p className="muted">{showingEntityPresentation ? "当前展示由 OCR 结果整理出的业务实体表；如需修订识别文本，请切回 OCR 结果。" : "默认展示 OCR 原始识别结果，可修改单元格值并核对合并关系。整理为实体表后，原始 OCR 结果仍可切回查看。"}</p></div><div className="button-row">{supportsEntityPresentation && <button type="button" className={showingEntityPresentation ? "quiet" : "primary"} onClick={() => onTablePresentationChange(showingEntityPresentation ? "ocr" : "entity")}>{showingEntityPresentation ? "查看 OCR 结果" : "整理为实体表"}</button>}{supportsEntityPresentation && <button type="button" className="primary" disabled={!showingEntityPresentation || dirty || databaseImportLoading} title={dirty ? "请先保存修订" : undefined} onClick={onDatabaseImport}>{databaseImportLoading ? "预校验中…" : "写入数据库"}</button>}<button type="button" className={dirty ? "primary" : "quiet"} onClick={onSave}>保存修订</button><button type="button" className="primary" onClick={() => void onExport("json")}>导出 JSON</button><button type="button" className="primary" onClick={() => void onExport("xlsx")}>导出 XLSX</button></div></div><div className="data-workspace"><OriginalImageViewer run={run} /><div className={`document-results-scroll ${showingEntityPresentation ? "entity-results-scroll" : ""}`}><DocumentTables tablePresentation={showingEntityPresentation ? "entity" : "ocr"} document={document} compare={compare} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} /></div></div></section>
+      <section className={`panel data-panel ${showingEntityPresentation ? "entity-data-panel" : ""}`}>
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">DATA PANEL</p>
+            <h2>{showingEntityPresentation ? "实体整理表" : "OCR 识别结果"} {dirty && <span className="unsaved-badge">有未保存修改</span>}</h2>
+            <p className="muted">{showingEntityPresentation ? "当前展示由 OCR 结果整理出的业务实体表；如需修订识别文本，请切回 OCR 结果。" : "默认展示 OCR 原始识别结果，可修改单元格值并核对合并关系。整理为实体表后，原始 OCR 结果仍可切回查看。"}</p>
+          </div>
+          <div className="button-row">
+            {supportsEntityPresentation && <button type="button" className={showingEntityPresentation ? "quiet" : "primary"} onClick={() => onTablePresentationChange(showingEntityPresentation ? "ocr" : "entity")}>{showingEntityPresentation ? "查看 OCR 结果" : "整理为实体表"}</button>}
+            {supportsEntityPresentation && <button type="button" className="primary" disabled={!showingEntityPresentation || dirty || databaseImportLoading || (showsPositionLimitPartnerPicker && !positionLimitPartnerRunId)} title={dirty ? "请先保存修订" : showsPositionLimitPartnerPicker && !positionLimitPartnerRunId ? "先选择另一类限仓来源的成功运行" : undefined} onClick={onDatabaseImport}>{databaseImportLoading ? "预校验中…" : showsPositionLimitPartnerPicker ? "写入期货+期权模板" : "写入数据库"}</button>}
+            <button type="button" className={dirty ? "primary" : "quiet"} onClick={onSave}>保存修订</button>
+            <button type="button" className="primary" onClick={() => void onExport("json")}>导出 JSON</button>
+            <button type="button" className="primary" onClick={() => void onExport("xlsx")}>导出 XLSX</button>
+          </div>
+        </div>
+        {showsPositionLimitPartnerPicker && <div className="position-limit-batch-source">
+          <label htmlFor="position-limit-partner-run">合并另一类限仓来源</label>
+          <select id="position-limit-partner-run" value={positionLimitPartnerRunId} onChange={(event) => onPositionLimitPartnerChange(event.target.value)} disabled={databaseImportLoading || positionLimitPartnerRuns.length === 0}>
+            {positionLimitPartnerRuns.length === 0 ? <option value="">暂无另一类限仓来源的成功运行</option> : positionLimitPartnerRuns.map((partnerRun) => <option key={partnerRun.id} value={partnerRun.id}>{partnerRun.source_name} · {formatTime(partnerRun.created_at)} · {partnerRun.id.slice(0, 8)}</option>)}
+          </select>
+          <small>两路数据将写入同一个 Oracle 草稿模板；可选择需要配对的已成功运行。</small>
+        </div>}
+        <div className="data-workspace">
+          <OriginalImageViewer run={run} />
+          <div className={`document-results-scroll ${showingEntityPresentation ? "entity-results-scroll" : ""}`}><DocumentTables tablePresentation={showingEntityPresentation ? "entity" : "ocr"} document={document} compare={compare} selectedRange={selectedRange} onChangeCell={onChangeCell} onSelectCell={onSelectCell} onMerge={onMerge} onUnmerge={onUnmerge} /></div>
+        </div>
+      </section>
       <Artifacts run={run} />
     </>}
   </>;

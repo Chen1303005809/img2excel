@@ -35,6 +35,7 @@ export interface PositionLimitRow {
   sourceText: string;
   sourceSectionId: string;
   sourceCells: SourceCellRef[];
+  sourceRunId?: string;
   groupId: string;
 }
 

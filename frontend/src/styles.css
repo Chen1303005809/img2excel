@@ -110,6 +110,10 @@ select { border: 1px solid #d8dee7; border-radius: 7px; padding: 9px 10px; color
 .position-limit-heading .muted { margin-bottom: 0; font-size: 11px; }
 .position-limit-count { flex: 0 0 auto; padding: 5px 8px; border-radius: 999px; color: #175ca6; background: #eaf2ff; font-size: 10px; font-weight: 700; }
 .position-limit-note { padding: 10px 14px; color: #7b6b4b; background: #fffaf0; font-size: 10px; line-height: 1.55; }
+.position-limit-batch-source { display: grid; grid-template-columns: 150px minmax(220px, 1fr); align-items: center; gap: 6px 10px; padding: 10px 14px; border-bottom: 1px solid #e1ebf7; background: #f5f9fe; color: #526174; font-size: 11px; }
+.position-limit-batch-source label { font-weight: 700; }
+.position-limit-batch-source select { width: 100%; }
+.position-limit-batch-source small { grid-column: 2; color: #7b8796; font-size: 10px; }
 .position-limit-table { width: 100%; min-width: 1180px; border-collapse: collapse; table-layout: fixed; font-size: 11px; }
 .position-limit-table th { padding: 10px 8px; border-bottom: 1px solid #dbe5f0; color: #6f7e90; background: #f5f9fe; text-align: left; font-size: 10px; font-weight: 800; }
 .position-limit-table th:nth-child(1) { width: 6%; }.position-limit-table th:nth-child(2) { width: 16%; }.position-limit-table th:nth-child(3) { width: 11%; }.position-limit-table th:nth-child(4) { width: 7%; }.position-limit-table th:nth-child(5) { width: 7%; }.position-limit-table th:nth-child(6) { width: 28%; }.position-limit-table th:nth-child(7) { width: 12%; }.position-limit-table th:nth-child(8) { width: 13%; }

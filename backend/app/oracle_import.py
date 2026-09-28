@@ -5,7 +5,7 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Protocol
@@ -176,6 +176,15 @@ class PositionLimitRowRequest(BaseModel):
     source_text: str = Field(default="", alias="sourceText")
     source_section_id: str = Field(default="", alias="sourceSectionId")
     source_cells: list[SourceCellRef] = Field(default_factory=list, alias="sourceCells")
+    source_run_id: str | None = Field(default=None, alias="sourceRunId")
+
+
+class ImportSourceDocumentRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    run_id: str = Field(alias="runId", min_length=1, max_length=36)
+    view: Literal["recognized", "revised"] = "revised"
+    document_sha256: str = Field(alias="documentSha256", min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 class ExceptionTradeRowRequest(BaseModel):
@@ -208,6 +217,7 @@ class DatabaseImportRequest(BaseModel):
     exception_rows: list[ExceptionTradeRowRequest] = Field(default_factory=list, alias="exceptionRows")
     unmapped_cells: list[str] = Field(default_factory=list, alias="unmappedCells")
     unmapped_limit_cells: list[str] = Field(default_factory=list, alias="unmappedLimitCells")
+    source_documents: list[ImportSourceDocumentRequest] = Field(default_factory=list, alias="sourceDocuments")
 
 
 class ImportIssue(BaseModel):
@@ -232,6 +242,7 @@ class ImportPlan:
     open_total_rows: list[dict[str, Any]]
     fingerprint: str
     creator_id: int | None = None
+    source_documents: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def counts(self) -> dict[str, int]:
@@ -257,6 +268,7 @@ class ImportPlan:
             "application_version": self.application_version,
             "position_rows": self.position_rows,
             "open_total_rows": self.open_total_rows,
+            "source_documents": self.source_documents,
             "fingerprint": self.fingerprint,
             "creator_id": self.creator_id,
         }
@@ -275,6 +287,7 @@ class ImportPlan:
             open_total_rows=list(payload.get("open_total_rows", [])),
             fingerprint=str(payload["fingerprint"]),
             creator_id=int(payload["creator_id"]) if payload.get("creator_id") is not None else None,
+            source_documents=list(payload.get("source_documents", [])),
         )
 
 
@@ -314,7 +327,27 @@ def _compact(value: str) -> str:
 
 
 def _source_cells(row: PositionLimitRowRequest | ExceptionTradeRowRequest) -> list[dict[str, Any]]:
-    return [cell.model_dump(mode="json", by_alias=True) for cell in row.source_cells]
+    cells = [cell.model_dump(mode="json", by_alias=True) for cell in row.source_cells]
+    if isinstance(row, PositionLimitRowRequest) and row.source_run_id:
+        for cell in cells:
+            cell["sourceRunId"] = row.source_run_id
+    return cells
+
+
+def source_documents_digest(source_documents: list[dict[str, Any]]) -> str:
+    normalized = [
+        {
+            "run_id": str(source["run_id"]),
+            "view": str(source["view"]),
+            "document_sha256": str(source["document_sha256"]),
+            "revision_id": source.get("revision_id"),
+        }
+        for source in source_documents
+    ]
+    normalized.sort(key=lambda source: source["run_id"])
+    if len(normalized) == 1:
+        return normalized[0]["document_sha256"]
+    return _fingerprint({"source_documents": normalized})
 
 
 def _issue(
@@ -634,13 +667,21 @@ def _validate_source_cells(document: dict[str, Any], cells: list[SourceCellRef],
 
 
 def _normalized_position_rows(
-    rows: list[PositionLimitRowRequest], document: dict[str, Any], issues: list[ImportIssue]
+    rows: list[PositionLimitRowRequest],
+    document: dict[str, Any],
+    issues: list[ImportIssue],
+    documents_by_run_id: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     for index, row in enumerate(rows):
         source_cells = _source_cells(row)
-        issues.extend(_validate_source_cells(document, row.source_cells, "position", index))
+        source_document = document
+        if row.source_run_id and documents_by_run_id is not None:
+            source_document = documents_by_run_id.get(row.source_run_id, document)
+            if row.source_run_id not in documents_by_run_id:
+                issues.append(_issue("position", index, "sourceRunId", "unknown_source_run", f"限仓行来源运行不在本批次中：{row.source_run_id}", source_cells))
+        issues.extend(_validate_source_cells(source_document, row.source_cells, "position", index))
         exchange_code = _exchange_code(row.exchange, row.exchange_code)
         if exchange_code is None:
             issues.append(_issue("position", index, "exchange", "unknown_exchange", f"无法映射交易所：{row.exchange}", source_cells))
@@ -802,6 +843,9 @@ def build_import_plan(
     document: dict[str, Any],
     body: DatabaseImportRequest,
     settings: Settings,
+    *,
+    source_documents: list[dict[str, Any]] | None = None,
+    documents_by_run_id: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[ImportPlan, list[ImportIssue]]:
     issues: list[ImportIssue] = []
     has_position = bool(body.position_rows)
@@ -814,7 +858,7 @@ def build_import_plan(
     inferred_type = POSITION_TEMPLATE_TYPE if has_position else OPEN_TOTAL_TEMPLATE_TYPE
     template_type = body.template_type or inferred_type
     if has_position and template_type != POSITION_TEMPLATE_TYPE:
-        issues.append(_issue("batch", -1, "templateType", "template_type_mismatch", "期权限仓实体与模板类型不匹配"))
+        issues.append(_issue("batch", -1, "templateType", "template_type_mismatch", "持仓限仓实体与模板类型不匹配"))
     if has_open_total and template_type != OPEN_TOTAL_TEMPLATE_TYPE:
         issues.append(_issue("batch", -1, "templateType", "template_type_mismatch", "开仓总量实体与模板类型不匹配"))
 
@@ -823,28 +867,60 @@ def build_import_plan(
     for cell in body.unmapped_limit_cells:
         issues.append(_issue("open_total", -1, "instrumentCode", "unmapped_limit_cell", f"未完成交易限额映射：{cell}"))
 
-    position_rows = _normalized_position_rows(body.position_rows, document, issues)
+    source_documents = source_documents or [
+        {
+            "run_id": run_id,
+            "view": body.view,
+            "document_sha256": body.document_sha256,
+            "revision_id": None,
+        }
+    ]
+    if len(source_documents) > 1:
+        if template_type != POSITION_TEMPLATE_TYPE:
+            issues.append(_issue("batch", -1, "sourceDocuments", "combined_sources_require_position_limits", "只有期货/期权限仓来源可以合并导入"))
+        if any(not row.source_run_id for row in body.position_rows):
+            issues.append(_issue("batch", -1, "positionRows", "source_run_required", "合并导入的每条限仓数据都必须标明来源运行"))
+        if {row.type for row in body.position_rows} != {"期货", "期权"}:
+            issues.append(_issue("batch", -1, "positionRows", "incomplete_position_types", "合并导入必须同时包含期货限仓和期权限仓数据"))
+
+    position_rows = _normalized_position_rows(body.position_rows, document, issues, documents_by_run_id)
     open_total_rows = _normalized_open_total_rows(body.exception_rows, document, issues)
     if template_type == POSITION_TEMPLATE_TYPE and not position_rows and not issues:
-        issues.append(_issue("batch", -1, "rows", "empty_position_rows", "没有可写入的期权限仓实体"))
+        issues.append(_issue("batch", -1, "rows", "empty_position_rows", "没有可写入的持仓限仓实体"))
     if template_type == OPEN_TOTAL_TEMPLATE_TYPE and not open_total_rows and not issues:
         issues.append(_issue("batch", -1, "rows", "empty_open_total_rows", "没有可写入的开仓总量实体"))
 
-    business_name = "期权限仓" if template_type == POSITION_TEMPLATE_TYPE else "开仓总量"
+    business_name = "持仓限仓" if template_type == POSITION_TEMPLATE_TYPE else "开仓总量"
     template_name = (body.template_name or f"自动导入-{business_name}-{datetime.now(ZoneInfo('Asia/Shanghai')):%Y%m%d}-{run_id[:8]}").strip()
     if not template_name or len(template_name) > 100:
         issues.append(_issue("batch", -1, "templateName", "invalid_template_name", "模板名称不能为空且不能超过100个字符"))
     remark = (body.remark or f"结构化实体表导入，运行ID={run_id}，文档哈希={body.document_sha256}").strip()
 
+    document_sha256 = source_documents_digest(source_documents)
+    canonical_source_documents = [
+        {
+            "run_id": source["run_id"],
+            "view": source["view"],
+            "document_sha256": source["document_sha256"],
+            "revision_id": source.get("revision_id"),
+        }
+        for source in source_documents
+    ]
+    canonical_source_documents.sort(key=lambda source: source["run_id"])
+    canonical_rows = sorted(
+        position_rows,
+        key=lambda row: json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str),
+    )
     canonical = {
         "template_type": template_type,
-        "position_rows": position_rows,
+        "position_rows": canonical_rows,
         "open_total_rows": open_total_rows,
+        "source_documents": canonical_source_documents,
     }
     plan = ImportPlan(
         run_id=run_id,
-        view=body.view,
-        document_sha256=body.document_sha256,
+        view="combined" if len(source_documents) > 1 else body.view,
+        document_sha256=document_sha256,
         template_type=template_type,
         template_name=template_name,
         remark=remark,
@@ -853,6 +929,7 @@ def build_import_plan(
         open_total_rows=open_total_rows,
         fingerprint=_fingerprint(canonical),
         creator_id=settings.oracle_creator_id,
+        source_documents=source_documents,
     )
     return plan, issues
 

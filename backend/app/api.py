@@ -36,12 +36,14 @@ from .models import (
 )
 from .oracle_import import (
     DatabaseImportRequest,
+    ImportSourceDocumentRequest,
     ImportIssue,
     ImportPlan,
     OracleImportError,
     OracleTemplateWriter,
     OracleWriter,
     build_import_plan,
+    source_documents_digest,
 )
 from .scheduling import DEFAULT_SCHEDULE_INTERVAL_MINUTES, create_queued_run, schedule_next_at
 from .url_utils import InvalidSourceUrl, default_source_name, normalize_url, validate_fetch_host
@@ -247,6 +249,7 @@ def _database_import_payload(session: Session, batch: DatabaseImportBatch) -> di
         "run_id": batch.run_id,
         "revision_id": batch.revision_id,
         "view": batch.view,
+        "source_documents": batch.payload.get("source_documents", []),
         "template_type": batch.template_type,
         "template_name": batch.template_name,
         "source_document_sha256": batch.source_document_sha256,
@@ -508,19 +511,75 @@ def build_router(
         if run.status != "succeeded":
             raise HTTPException(status_code=409, detail="only a successful run can be imported")
 
-        _, raw_envelope, envelope, revision = _selected_document(session, run_id, body.view, store)
-        current_document_hash = document_sha256(envelope["document"])
-        if body.document_sha256 != current_document_hash:
-            raise HTTPException(status_code=409, detail="document changed; reload the entity table before importing")
+        requested_sources = body.source_documents or [
+            ImportSourceDocumentRequest(run_id=run_id, view=body.view, document_sha256=body.document_sha256)
+        ]
+        source_ids = [source.run_id for source in requested_sources]
+        if len(source_ids) != len(set(source_ids)):
+            raise HTTPException(status_code=422, detail="同一运行不能在合并批次中重复选择")
+        if run_id not in source_ids:
+            raise HTTPException(status_code=422, detail="合并来源必须包含当前选中的运行")
+        if len(requested_sources) > 2:
+            raise HTTPException(status_code=422, detail="一次限仓导入最多合并期货与期权两个来源")
 
-        actual_view = "revised" if revision else "recognized"
-        request = body if body.view == actual_view else body.model_copy(update={"view": actual_view})
-        plan, issues = build_import_plan(run_id, envelope["document"], request, runtime_settings)
+        source_documents: list[dict[str, Any]] = []
+        documents_by_run_id: dict[str, dict[str, Any]] = {}
+        primary_envelope: dict[str, Any] | None = None
+        primary_revision: DocumentRevision | None = None
+        primary_view = body.view
+        seen_source_ids: set[str] = set()
+        for requested_source in requested_sources:
+            source_run = session.get(Run, requested_source.run_id)
+            if source_run is None:
+                raise HTTPException(status_code=404, detail=f"来源运行不存在：{requested_source.run_id}")
+            if source_run.status != "succeeded":
+                raise HTTPException(status_code=409, detail=f"来源运行尚未成功：{requested_source.run_id}")
+            if source_run.source_id in seen_source_ids:
+                raise HTTPException(status_code=422, detail="合并批次必须来自不同的限仓来源")
+            seen_source_ids.add(source_run.source_id)
+
+            _, _, source_envelope, source_revision = _selected_document(session, source_run.id, requested_source.view, store)
+            source_hash = document_sha256(source_envelope["document"])
+            if requested_source.document_sha256 != source_hash:
+                raise HTTPException(status_code=409, detail=f"来源运行 {source_run.id} 的文档已变化，请刷新后重试")
+            actual_view = "revised" if source_revision else "recognized"
+            source = session.get(Source, source_run.source_id)
+            source_documents.append(
+                {
+                    "run_id": source_run.id,
+                    "source_name": source.name if source else source_run.requested_url,
+                    "view": actual_view,
+                    "document_sha256": source_hash,
+                    "revision_id": source_revision.id if source_revision else None,
+                }
+            )
+            documents_by_run_id[source_run.id] = source_envelope["document"]
+            if source_run.id == run_id:
+                primary_envelope = source_envelope
+                primary_revision = source_revision
+                primary_view = actual_view
+                if body.document_sha256 != source_hash:
+                    raise HTTPException(status_code=409, detail="document changed; reload the entity table before importing")
+                if requested_source.view != body.view:
+                    raise HTTPException(status_code=422, detail="当前运行的来源视图与批次视图不一致")
+
+        if primary_envelope is None:
+            raise HTTPException(status_code=422, detail="合并来源中缺少当前运行")
+        request = body if body.view == primary_view else body.model_copy(update={"view": primary_view})
+        batch_run_id = min(source_ids)
+        plan, issues = build_import_plan(
+            batch_run_id,
+            primary_envelope["document"],
+            request,
+            runtime_settings,
+            source_documents=source_documents,
+            documents_by_run_id=documents_by_run_id,
+        )
 
         duplicate = session.scalar(
             select(DatabaseImportBatch)
             .where(
-                DatabaseImportBatch.run_id == run_id,
+                DatabaseImportBatch.run_id == batch_run_id,
                 DatabaseImportBatch.source_document_sha256 == plan.document_sha256,
                 DatabaseImportBatch.template_type == plan.template_type,
                 DatabaseImportBatch.entity_fingerprint == plan.fingerprint,
@@ -540,8 +599,8 @@ def build_router(
                 plan.creator_id = target_result.creator_id
 
         if duplicate is not None:
-            duplicate.revision_id = revision.id if revision else None
-            duplicate.view = actual_view
+            duplicate.revision_id = primary_revision.id if len(source_documents) == 1 and primary_revision else None
+            duplicate.view = plan.view
             duplicate.template_type = plan.template_type
             duplicate.template_name = plan.template_name
             duplicate.source_document_sha256 = plan.document_sha256
@@ -562,9 +621,9 @@ def build_router(
 
         batch = DatabaseImportBatch(
             id=str(uuid4()),
-            run_id=run_id,
-            revision_id=revision.id if revision else None,
-            view=actual_view,
+            run_id=batch_run_id,
+            revision_id=primary_revision.id if len(source_documents) == 1 and primary_revision else None,
+            view=plan.view,
             template_type=plan.template_type,
             template_name=plan.template_name,
             source_document_sha256=plan.document_sha256,
@@ -584,7 +643,7 @@ def build_router(
             duplicate = session.scalar(
                 select(DatabaseImportBatch)
                 .where(
-                    DatabaseImportBatch.run_id == run_id,
+                    DatabaseImportBatch.run_id == batch_run_id,
                     DatabaseImportBatch.source_document_sha256 == plan.document_sha256,
                     DatabaseImportBatch.template_type == plan.template_type,
                     DatabaseImportBatch.entity_fingerprint == plan.fingerprint,
@@ -609,31 +668,51 @@ def build_router(
         if batch.status != "preflight_succeeded":
             raise HTTPException(status_code=409, detail=f"导入批次当前状态不可提交：{batch.status}")
 
-        run = session.get(Run, batch.run_id)
-        if run is None:
-            raise HTTPException(status_code=404, detail="run not found")
-        if run.status != "succeeded":
-            raise HTTPException(status_code=409, detail="only a successful run can be imported")
-
-        _, raw_envelope, envelope, revision = _selected_document(session, batch.run_id, batch.view, store)
-        current_document_hash = document_sha256(envelope["document"])
-        if current_document_hash != batch.source_document_sha256:
-            issue = ImportIssue(
-                entity_type="batch",
-                entity_index=-1,
-                field="documentSha256",
-                code="document_changed",
-                message="预校验后文档内容发生变化，请重新预校验",
-            )
-            batch.status = "failed"
-            batch.error_message = issue.message
-            _store_database_import_issues(session, batch.id, [issue])
-            session.commit()
-            raise HTTPException(status_code=409, detail=issue.message)
-        if (revision is None) != (batch.revision_id is None) or (revision is not None and revision.id != batch.revision_id):
-            raise HTTPException(status_code=409, detail="文档修订版本发生变化，请重新预校验")
-
         plan = ImportPlan.from_payload(batch.payload)
+        source_documents = plan.source_documents or [
+            {
+                "run_id": batch.run_id,
+                "view": batch.view,
+                "document_sha256": batch.source_document_sha256,
+                "revision_id": batch.revision_id,
+            }
+        ]
+        current_sources: list[dict[str, Any]] = []
+        for source in source_documents:
+            source_run = session.get(Run, source["run_id"])
+            if source_run is None:
+                raise HTTPException(status_code=404, detail=f"来源运行不存在：{source['run_id']}")
+            if source_run.status != "succeeded":
+                raise HTTPException(status_code=409, detail=f"来源运行尚未成功：{source['run_id']}")
+            _, _, source_envelope, revision = _selected_document(session, source_run.id, source["view"], store)
+            current_document_hash = document_sha256(source_envelope["document"])
+            if current_document_hash != source["document_sha256"]:
+                issue = ImportIssue(
+                    entity_type="batch",
+                    entity_index=-1,
+                    field="documentSha256",
+                    code="source_document_changed",
+                    message=f"预校验后来源运行 {source_run.id} 的文档内容发生变化，请重新预校验",
+                )
+                batch.status = "failed"
+                batch.error_message = issue.message
+                _store_database_import_issues(session, batch.id, [issue])
+                session.commit()
+                raise HTTPException(status_code=409, detail=issue.message)
+            current_revision_id = revision.id if revision else None
+            if current_revision_id != source.get("revision_id"):
+                raise HTTPException(status_code=409, detail=f"来源运行 {source_run.id} 的修订版本发生变化，请重新预校验")
+            current_sources.append(
+                {
+                    "run_id": source_run.id,
+                    "view": "revised" if revision else "recognized",
+                    "document_sha256": current_document_hash,
+                    "revision_id": current_revision_id,
+                }
+            )
+        if source_documents_digest(current_sources) != plan.document_sha256 or plan.document_sha256 != batch.source_document_sha256:
+            raise HTTPException(status_code=409, detail="导入来源指纹不匹配，请重新预校验")
+
         batch.status = "committing"
         batch.error_message = None
         batch.updated_at = utc_now()
