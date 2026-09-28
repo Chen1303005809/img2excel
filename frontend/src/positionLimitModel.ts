@@ -218,7 +218,16 @@ function positionHeaderGroups(section: TableSection, rowIndex: number, row: stri
   if (hasSyntheticFirstGroup && (!firstGroup || (firstGroup.c1 === 1 && secondGroup?.c0 === 2))) {
     if (firstGroup) groups.splice(groups.indexOf(firstGroup), 1);
     if (secondGroup) groups.splice(groups.indexOf(secondGroup), 1);
-    groups.unshift({ c0: 1, c1: 2, label: normalizedRow[2].replace(/限仓比例.*$/, "") || "下一交易日" });
+    const parentRow = rowIndex > 0 ? section.cells[rowIndex - 1].map(cellText) : null;
+    const parentDateGroup = parentRow
+      ? rowMergeGroups(section, rowIndex - 1, parentRow).find(
+          (group) => group.c0 === 1 && group.c1 >= 2 && isDatePeriodText(group.label),
+        )
+      : undefined;
+    // “下一交易日限仓比例” describes when the ratio is applied, not a
+    // contract-date bucket. Use its enclosing period; these ratio tables span
+    // the contract life when they have no explicit parent period.
+    groups.unshift({ c0: 1, c1: 2, label: parentDateGroup?.label ?? "合约挂牌至交割月份" });
   }
   return groups.sort((left, right) => left.c0 - right.c0);
 }
