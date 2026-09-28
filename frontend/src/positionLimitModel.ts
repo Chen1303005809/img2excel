@@ -1,4 +1,10 @@
-import { contractCodePrefixForMapping, exchangeCodeForName, INSTRUMENT_MAPPINGS, type InstrumentMapping } from "./exceptionTradeModel";
+import {
+  contractCodePrefixForMapping,
+  exchangeCodeForName,
+  INSTRUMENT_MAPPINGS,
+  normalizeInstrumentCodeForExchange,
+  type InstrumentMapping,
+} from "./exceptionTradeModel";
 import type { Document, Scalar, SourceCellRef, TableSection } from "./types";
 
 export type PositionLimitInstrumentType = "期货" | "期权";
@@ -296,7 +302,8 @@ function explicitContractCodes(text: string): string[] {
 
 function resolveInstrumentCodes(
   productText: string,
-  kind: PositionLimitInstrumentType = "期货",
+  kind: PositionLimitInstrumentType,
+  exchangeCode: string | null,
 ): { codes: string[]; mapped: boolean } {
   const matches = mappingMatches(productText);
   const explicitCodes = explicitContractCodes(productText);
@@ -305,11 +312,22 @@ function resolveInstrumentCodes(
       const prefix = code.replace(/\d{4}$/, "");
       return POSITION_MAPPINGS.some((mapping) => [contractCodePrefixForMapping(mapping), mapping.optionCode].filter(Boolean).includes(prefix));
     });
-    if (mappedCodes.length) return { codes: mappedCodes, mapped: true };
+    if (mappedCodes.length) {
+      return {
+        codes: mappedCodes.map((code) => normalizeInstrumentCodeForExchange(code, exchangeCode)),
+        mapped: true,
+      };
+    }
   }
   if (matches.length) {
     return {
-      codes: [...new Set(matches.map(({ mapping }) => (kind === "期权" ? mapping.optionCode ?? mapping.code : mapping.code)))],
+      codes: [
+        ...new Set(
+          matches.map(({ mapping }) =>
+            normalizeInstrumentCodeForExchange(kind === "期权" ? mapping.optionCode ?? mapping.code : mapping.code, exchangeCode),
+          ),
+        ),
+      ],
       mapped: true,
     };
   }
@@ -628,7 +646,8 @@ function simplePositionRows(
     const product = displayText(rows[rowIndex][0] ?? "");
     if (!isSimplePositionProduct(product)) continue;
     const type = instrumentType(document, product);
-    const resolved = resolveInstrumentCodes(product, type);
+    const exchangeCode = exchangeCodeForName(exchange);
+    const resolved = resolveInstrumentCodes(product, type, exchangeCode);
     const instrument = resolved.codes.join("、");
     if (!instrument || !rows[rowIndex].slice(1).some(isLimitValue)) continue;
     if (!resolved.mapped) unmapped.push(product);
@@ -641,7 +660,7 @@ function simplePositionRows(
       id: `${groupId}:0:${DEFAULT_TOTAL_POSITION}:${limitRule}`,
       type,
       exchange,
-      exchangeCode: exchangeCodeForName(exchange),
+      exchangeCode,
       instrument,
       direction: "所有",
       hedge: "所有",
@@ -665,7 +684,7 @@ function rowsForProduct(
   exchange: string,
 ): { rows: PositionLimitRow[]; unmapped: string[] } {
   const type = instrumentType(document, group.name);
-  const resolved = resolveInstrumentCodes(group.name, type);
+  const resolved = resolveInstrumentCodes(group.name, type, exchangeCodeForName(exchange));
   const instrument = resolved.codes.join("、");
   const unmapped = resolved.mapped ? [] : [group.name];
   if (!instrument) return { rows: [], unmapped };

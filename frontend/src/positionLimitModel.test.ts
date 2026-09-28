@@ -67,7 +67,7 @@ describe("position limit table", () => {
     expect(isPositionLimitDocument(fixtureDocument())).toBe(true);
     expect(table.rows.length).toBeGreaterThan(5);
     expect(table.unmappedCells).toEqual([]);
-    expect(table.rows.some((row) => row.exchange === "大连商品交易所" && row.instrument === "V、PP、L" && row.exchangeCode === "DCE")).toBe(true);
+    expect(table.rows.some((row) => row.exchange === "大连商品交易所" && row.instrument === "v、pp、l" && row.exchangeCode === "DCE")).toBe(true);
     expect(table.rows.some((row) => row.exchange === "郑州商品交易所" && row.instrument === "TA")).toBe(true);
   });
 
@@ -103,7 +103,7 @@ describe("position limit table", () => {
     const table = extractPositionLimitTable(document);
     expect(table.rows).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ type: "期权", exchange: "大连商品交易所", instrument: "PX", limitRule: "固定值40000" }),
+        expect.objectContaining({ type: "期权", exchange: "大连商品交易所", instrument: "px", limitRule: "固定值40000" }),
         expect.objectContaining({ type: "期权", exchange: "中国金融期货交易所", instrument: "IO", limitRule: "固定值5000" }),
       ]),
     );

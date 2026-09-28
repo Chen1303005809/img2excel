@@ -53,13 +53,13 @@ describe("exception trade table view model", () => {
       expect.objectContaining({
         exchange: "大连商品交易所",
         instrumentName: "聚氯乙烯月均价",
-        instrumentCode: "V_f",
+        instrumentCode: "v_f",
         openTotal: 18000,
         openTotalWarning: 14400,
         scope: "product",
       }),
-      expect.objectContaining({ instrumentName: "白银", instrumentCode: "AG", openTotal: 7000, scope: "product" }),
-      expect.objectContaining({ instrumentName: "白银", instrumentCode: "AG2607、AG2608", openTotal: 800, scope: "contract" }),
+      expect.objectContaining({ instrumentName: "白银", instrumentCode: "ag", openTotal: 7000, scope: "product" }),
+      expect.objectContaining({ instrumentName: "白银", instrumentCode: "ag2607、ag2608", openTotal: 800, scope: "contract" }),
     ]));
   });
 
@@ -134,12 +134,12 @@ describe("exception trade table view model", () => {
     expect(result.rows).toHaveLength(52);
     expect(result.rows.every((row) => row.level === "合约级")).toBe(true);
     expect(result.rows).toEqual(expect.arrayContaining([
-      expect.objectContaining({ instrumentName: "线型低密度聚乙烯月均价", instrumentCode: "L_f" }),
-      expect.objectContaining({ instrumentName: "聚氯乙烯月均价", instrumentCode: "V_f" }),
-      expect.objectContaining({ instrumentName: "聚丙烯月均价", instrumentCode: "PP_f" }),
+      expect.objectContaining({ instrumentName: "线型低密度聚乙烯月均价", instrumentCode: "l_f" }),
+      expect.objectContaining({ instrumentName: "聚氯乙烯月均价", instrumentCode: "v_f" }),
+      expect.objectContaining({ instrumentName: "聚丙烯月均价", instrumentCode: "pp_f" }),
     ]));
-    expect(result.rows.find((row) => row.instrumentCode === "SC")).toMatchObject({ openTotal: 400, openTotalWarning: 320 });
-    expect(result.rows.find((row) => row.instrumentCode === "PS2607、PS2608、PS2609、PS2610、PS2611、PS2612、PS2701、PS2702、PS2703、PS2704、PS2705、PS2706、PS2707")?.openTotal).toBe(200);
+    expect(result.rows.find((row) => row.instrumentCode === "sc")).toMatchObject({ openTotal: 400, openTotalWarning: 320 });
+    expect(result.rows.find((row) => row.instrumentCode === "ps2607、ps2608、ps2609、ps2610、ps2611、ps2612、ps2701、ps2702、ps2703、ps2704、ps2705、ps2706、ps2707")?.openTotal).toBe(200);
   });
 
   it("recognizes exception documents without relying on OCR section labels", () => {

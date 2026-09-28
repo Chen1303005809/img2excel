@@ -195,6 +195,10 @@ export function exchangeCodeForName(name: string): string | null {
   return EXCHANGE_CODE_BY_NAME[name.trim()] ?? null;
 }
 
+export function normalizeInstrumentCodeForExchange(code: string, exchangeCode: string | null): string {
+  return exchangeCode === "CZCE" || exchangeCode === "CFFEX" ? code.toUpperCase() : code.toLowerCase();
+}
+
 export const DEFAULT_WARNING_RATIO = 0.8;
 
 function cellText(value: Scalar): string {
@@ -315,12 +319,13 @@ function makeRow(
   level: ExceptionTradeLevel = "合约级",
 ): ExceptionTradeRow {
   const instrumentName = mappings.map((item) => item.name).join("、");
-  const instrumentCode = [...new Set(codes)].join("、");
+  const exchangeCode = exchangeCodeForName(mappings[0].exchange);
+  const instrumentCode = [...new Set(codes.map((code) => normalizeInstrumentCodeForExchange(code, exchangeCode)))].join("、");
   const id = [mappings.map((item) => item.name).join(","), instrumentCode, openTotal, kind, level].join("|");
   return {
     id,
     exchange: mappings[0].exchange,
-    exchangeCode: exchangeCodeForName(mappings[0].exchange),
+    exchangeCode,
     instrumentName,
     instrumentCode,
     openTotal,
