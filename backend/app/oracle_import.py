@@ -335,14 +335,15 @@ def _issue(
     )
 
 
-def _split_codes(value: str) -> list[str]:
-    # Lowercase target entity codes here; the source OCR document remains unchanged.
+def _split_codes(value: str, exchange_code: str | None) -> list[str]:
+    # Normalize target entity codes by exchange; the source OCR document remains unchanged.
+    uppercase = exchange_code in {"CZCE", "CFFEX"}
     codes: list[str] = []
     for item in re.split(r"[、,，/;；\s]+", value):
-        code = item.strip().lower()
+        code = item.strip()
         if not code:
             continue
-        codes.append(code)
+        codes.append(code.upper() if uppercase else code.lower())
     return codes
 
 
@@ -630,7 +631,7 @@ def _normalized_position_rows(
         if exchange_code is None:
             issues.append(_issue("position", index, "exchange", "unknown_exchange", f"无法映射交易所：{row.exchange}", source_cells))
 
-        product_ids = _split_codes(row.product_id or row.instrument)
+        product_ids = _split_codes(row.product_id or row.instrument, exchange_code)
         if not product_ids:
             issues.append(_issue("position", index, "instrument", "empty_product_id", "品种/合约代码为空", source_cells))
         for product_id in product_ids:
@@ -728,7 +729,7 @@ def _normalized_open_total_rows(
         exchange_code = _exchange_code(row.exchange, row.exchange_code)
         if exchange_code is None:
             issues.append(_issue("open_total", index, "exchange", "unknown_exchange", f"无法映射交易所：{row.exchange}", source_cells))
-        instrument_ids = _split_codes(row.instrument_code)
+        instrument_ids = _split_codes(row.instrument_code, exchange_code)
         if not instrument_ids:
             issues.append(_issue("open_total", index, "instrumentCode", "empty_instrument_id", "品种/合约代码为空", source_cells))
         for instrument_id in instrument_ids:

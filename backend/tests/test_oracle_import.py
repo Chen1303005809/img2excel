@@ -227,7 +227,7 @@ def test_import_mapping_rules_are_strict_and_target_oriented():
     assert plan.position_rows == [
         {
             "exchange_id": "CFFEX",
-            "product_id": "af",
+            "product_id": "AF",
             "product_type": 1,
             "position_direction": 2,
             "hedge_flag": 0,
@@ -266,7 +266,7 @@ def test_import_mapping_rules_are_strict_and_target_oriented():
     assert open_issues == []
     assert open_plan.open_total_rows == [
         {
-            "instrument_id": "io",
+            "instrument_id": "IO",
             "limit_volume": 100,
             "limit_warn_volume": 80,
             "is_product": 0,
@@ -277,7 +277,7 @@ def test_import_mapping_rules_are_strict_and_target_oriented():
             "source_cells": [],
         },
         {
-            "instrument_id": "mo",
+            "instrument_id": "MO",
             "limit_volume": 100,
             "limit_warn_volume": 80,
             "is_product": 0,
