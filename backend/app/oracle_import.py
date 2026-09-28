@@ -134,6 +134,7 @@ KNOWN_PRODUCT_CODES = frozenset(
         "MO",
     }
 )
+KNOWN_PRODUCT_CODES_UPPER = frozenset(code.upper() for code in KNOWN_PRODUCT_CODES)
 
 
 class SourceCellRef(BaseModel):
@@ -335,14 +336,13 @@ def _issue(
 
 
 def _split_codes(value: str) -> list[str]:
+    # Lowercase target entity codes here; the source OCR document remains unchanged.
     codes: list[str] = []
     for item in re.split(r"[、,，/;；\s]+", value):
-        code = item.strip().upper()
+        code = item.strip().lower()
         if not code:
             continue
-        # Keep the special product suffix in its canonical lowercase form
-        # after normalizing ordinary exchange codes to uppercase.
-        codes.append(re.sub(r"_F(?=\d*$)", "_f", code))
+        codes.append(code)
     return codes
 
 
@@ -546,13 +546,14 @@ def parse_date_rule(value: str) -> PositionDateRule | None:
 
 
 def _valid_instrument_code(value: str) -> bool:
-    return re.fullmatch(r"[A-Z]{1,5}(?:_[Ff])?[0-9]{0,8}", value) is not None
+    return re.fullmatch(r"[A-Za-z]{1,5}(?:_[Ff])?[0-9]{0,8}", value) is not None
 
 
 def _known_instrument_code(value: str) -> bool:
     prefix = re.sub(r"[0-9]+$", "", value)
-    base_prefix = re.sub(r"_[Ff]$", "", prefix)
-    return prefix in KNOWN_PRODUCT_CODES or base_prefix in KNOWN_PRODUCT_CODES
+    normalized_prefix = prefix.upper()
+    base_prefix = re.sub(r"_F$", "", normalized_prefix)
+    return normalized_prefix in KNOWN_PRODUCT_CODES_UPPER or base_prefix in KNOWN_PRODUCT_CODES_UPPER
 
 
 def _valid_date_rule(rule: PositionDateRule) -> bool:

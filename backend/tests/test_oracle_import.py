@@ -227,7 +227,7 @@ def test_import_mapping_rules_are_strict_and_target_oriented():
     assert plan.position_rows == [
         {
             "exchange_id": "CFFEX",
-            "product_id": "AF",
+            "product_id": "af",
             "product_type": 1,
             "position_direction": 2,
             "hedge_flag": 0,
@@ -266,7 +266,7 @@ def test_import_mapping_rules_are_strict_and_target_oriented():
     assert open_issues == []
     assert open_plan.open_total_rows == [
         {
-            "instrument_id": "IO",
+            "instrument_id": "io",
             "limit_volume": 100,
             "limit_warn_volume": 80,
             "is_product": 0,
@@ -277,7 +277,7 @@ def test_import_mapping_rules_are_strict_and_target_oriented():
             "source_cells": [],
         },
         {
-            "instrument_id": "MO",
+            "instrument_id": "mo",
             "limit_volume": 100,
             "limit_warn_volume": 80,
             "is_product": 0,
@@ -314,7 +314,7 @@ def test_f_suffix_product_code_is_accepted_by_database_import():
     plan, issues = build_import_plan("run-f-suffix", {"sections": []}, request, settings)
 
     assert issues == []
-    assert plan.position_rows[0]["product_id"] == "V_f"
+    assert plan.position_rows[0]["product_id"] == "v_f"
 
 
 def test_oracle_connect_does_not_receive_call_timeout(monkeypatch):
