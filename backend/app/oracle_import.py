@@ -491,6 +491,8 @@ def _parse_date_endpoint(value: str, *, start: bool) -> dict[str, int] | None:
     text_value = re.sub(r"期间.*$", "", text_value)
     text_value = re.sub(r"(起|开始)$", "", text_value)
 
+    if re.search(r"交割月(?:份)?(?:前|之前)的?一个交易日", text_value):
+        return {"month": 1, "day": 1, "daytype": 0, "ordertype": 1}
     if re.search(r"(?:合约)?(?:挂牌|上市)", text_value):
         return {"month": -1, "day": -1, "daytype": 0, "ordertype": 0}
     if "最后交易日" in text_value and "交割月" not in text_value:
@@ -534,6 +536,9 @@ def _parse_date_endpoint(value: str, *, start: bool) -> dict[str, int] | None:
 
 def parse_date_rule(value: str) -> PositionDateRule | None:
     text_value = _compact(value)
+    near_delivery_match = re.fullmatch(r"临近交割月份?[（(](.*)[）)]", text_value)
+    if near_delivery_match:
+        text_value = near_delivery_match.group(1)
     if text_value in {
         "合约挂牌至交割月份",
         "合约上市至交割月份",
@@ -657,7 +662,13 @@ def _normalized_position_rows(
         if hedge_flag is None:
             issues.append(_issue("position", index, "hedge", "invalid_hedge_flag", f"投保类型非法：{row.hedge}", source_cells))
 
-        parsed_date_rule = parse_date_rule(row.holding_date)
+        if _compact(row.holding_date) == "一般月份" and row.date_rule is not None:
+            # “一般月份” is a category heading. The frontend resolves its end
+            # boundary from the adjacent explicit date heading and sends the
+            # corresponding structured rule with the source row.
+            parsed_date_rule = row.date_rule
+        else:
+            parsed_date_rule = parse_date_rule(row.holding_date)
         date_rule = row.date_rule or parsed_date_rule
         date_rule_valid = date_rule is not None and _valid_date_rule(date_rule)
         if row.date_rule is not None and parsed_date_rule is None:

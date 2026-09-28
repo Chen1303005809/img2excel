@@ -92,6 +92,8 @@ interface DateGroup {
   c0: number;
   c1: number;
   label: string;
+  dateRule?: PositionDateRule;
+  contextGroup?: DateGroup;
 }
 
 interface PositionRange {
@@ -257,7 +259,7 @@ function findDateHeaders(section: TableSection, rows: string[][]): LimitBlock[] 
   for (let index = 0; index < headerIndexes.length; index += 1) {
     const headerIndex = headerIndexes[index];
     const endRow = headerIndexes[index + 1] ?? rows.length;
-    const dateGroups = positionHeaderGroups(section, headerIndex, rows[headerIndex]);
+    const dateGroups = resolveImplicitDateGroups(positionHeaderGroups(section, headerIndex, rows[headerIndex]));
     if (!dateGroups.length) continue;
     const dataStart = firstProductRow(rows, headerIndex + 1, endRow);
     if (dataStart >= endRow) continue;
@@ -457,6 +459,11 @@ function positionRowSourceCells(block: LimitBlock, group: ProductGroup, date: Da
   for (let column = date.c0; column <= date.c1; column += 1) {
     cells.push({ sectionId: block.section.id, row: block.headerRow, column });
   }
+  if (date.contextGroup) {
+    for (let column = date.contextGroup.c0; column <= date.contextGroup.c1; column += 1) {
+      cells.push({ sectionId: block.section.id, row: block.headerRow, column });
+    }
+  }
   return uniqueSourceCells(cells);
 }
 
@@ -527,6 +534,9 @@ function parseDateEndpoint(
   start: boolean,
 ): { month: number; day: number; daytype: 0 | 1; ordertype: 0 | 1 } | null {
   let text = compact(value).replace(/^(自|从)/, "").replace(/期间.*$/, "").replace(/(起|开始)$/, "");
+  if (/交割月(?:份)?(?:前|之前)的?一个交易日/.test(text)) {
+    return { month: 1, day: 1, daytype: 0, ordertype: 1 };
+  }
   if (/(?:合约)?(?:挂牌|上市)/.test(text)) {
     return { month: -1, day: -1, daytype: 0, ordertype: 0 };
   }
@@ -560,7 +570,10 @@ function parseDateEndpoint(
 }
 
 function parsePositionDateRule(value: string): PositionDateRule | undefined {
-  const text = compact(value);
+  let text = compact(value).replace(/[（）]/g, (character) => (character === "（" ? "(" : ")"));
+  if (/^临近交割月份?\(/.test(text)) {
+    text = text.slice(text.indexOf("(") + 1, text.lastIndexOf(")"));
+  }
   if (isCompoundDeliveryMonthLabel(text)) return undefined;
   if (text === "上市首日" || text === "挂牌首日") return contractListingRule();
   if (text === "合约挂牌至交割月份" || text === "合约上市至交割月份") {
@@ -599,6 +612,59 @@ function parsePositionDateRule(value: string): PositionDateRule | undefined {
   };
 }
 
+function previousDateEndpoint(
+  endpoint: NonNullable<ReturnType<typeof parseDateEndpoint>>,
+): NonNullable<ReturnType<typeof parseDateEndpoint>> | null {
+  if (endpoint.month === -2 && endpoint.day === -2) {
+    return { month: 1, day: 1, daytype: endpoint.daytype, ordertype: 1 };
+  }
+  if (endpoint.month < 1 || endpoint.day < 1) return null;
+  if (endpoint.ordertype === 1) {
+    return { ...endpoint, day: endpoint.day + 1 };
+  }
+  if (endpoint.day > 1) {
+    return { ...endpoint, day: endpoint.day - 1 };
+  }
+  return endpoint.month < 12
+    ? { ...endpoint, month: endpoint.month + 1, day: 1, ordertype: 1 }
+    : null;
+}
+
+function generalMonthRule(nextPeriodLabel: string): PositionDateRule | undefined {
+  let boundaryText = compact(nextPeriodLabel).replace(/[（）]/g, (character) => (character === "（" ? "(" : ")"));
+  if (/^临近交割月份?\(/.test(boundaryText)) {
+    boundaryText = boundaryText.slice(boundaryText.indexOf("(") + 1, boundaryText.lastIndexOf(")"));
+  }
+  boundaryText = boundaryText.replace(/\(自然人客户限仓为0\)/g, "");
+  const isDeliveryMonth = /^交割月份?(?:\(.*\))?$/.test(boundaryText);
+  if (!boundaryText.endsWith("起") && !isDeliveryMonth) return undefined;
+  const boundary = parseDateEndpoint(boundaryText, true);
+  if (!boundary) return undefined;
+  const end = previousDateEndpoint(boundary);
+  if (!end) return undefined;
+  return {
+    startmonth: -1,
+    startday: -1,
+    startdaytype: 0,
+    endmonth: end.month,
+    endday: end.day,
+    enddaytype: end.daytype,
+    startordertype: 0,
+    endordertype: end.ordertype,
+  };
+}
+
+function resolveImplicitDateGroups(groups: DateGroup[]): DateGroup[] {
+  return groups.map((group, index) => {
+    if (!/^一般月份(?:\(.*\))?$/.test(compact(group.label).replace(/[（）]/g, (character) => (character === "（" ? "(" : ")")))) {
+      return group;
+    }
+    const nextGroup = groups[index + 1];
+    const dateRule = nextGroup ? generalMonthRule(nextGroup.label) : undefined;
+    return dateRule && nextGroup ? { ...group, dateRule, contextGroup: nextGroup } : group;
+  });
+}
+
 function makePositionRow(
   block: LimitBlock,
   group: ProductGroup,
@@ -613,6 +679,7 @@ function makePositionRow(
   sourceCells = positionRowSourceCells(block, group, date),
 ): PositionLimitRow {
   const groupId = `${block.section.id}:${group.startRow}:${instrumentTypeValue}:${instrument}`;
+  const holdingDate = normalizeDateLabel(date.label);
   return {
     id: `${groupId}:${dateIndex}:${ruleIndex}:${totalPosition}:${limitRule}`,
     type: instrumentTypeValue,
@@ -621,8 +688,8 @@ function makePositionRow(
     instrument,
     direction: "所有",
     hedge: "所有",
-    holdingDate: normalizeDateLabel(date.label),
-    dateRule: parsePositionDateRule(normalizeDateLabel(date.label)),
+    holdingDate,
+    dateRule: date.dateRule ?? parsePositionDateRule(holdingDate),
     totalPosition,
     limitRule,
     sourceText: groupSourceText(group),
@@ -635,6 +702,9 @@ function makePositionRow(
 function normalizeDateLabel(value: string): string {
   let text = compact(value);
   text = text.replace(/交割月份/g, "交割月").replace(/最后个/g, "最后一个");
+  if (/^一般月份(?:\(.*\))?$/.test(text.replace(/[（）]/g, (character) => (character === "（" ? "(" : ")")))) {
+    return "一般月份";
+  }
   text = text.replace(/^自(?=合约)/, "");
   text = text.replace(/交割月[（(]自然人客户限仓为0[）)]/g, "交割月");
   text = text.replace(/交割月份[（(]自然人客户限仓为0[）)]/g, "交割月份");
