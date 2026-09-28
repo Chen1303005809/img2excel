@@ -176,6 +176,45 @@ export function contractCodePrefixForMapping(mapping: InstrumentMapping): string
   return mapping.contractCodePrefix ?? mapping.code;
 }
 
+export interface ProductMonthQualifier {
+  month: number;
+  excluded: boolean;
+}
+
+/** Return a month qualifier from labels such as “生猪（7月）” or “生猪（非7月）”. */
+export function productMonthQualifier(value: string): ProductMonthQualifier | null {
+  const normalized = value
+    .replace(/[\s\u3000]+/g, "")
+    .replace(/[（]/g, "(")
+    .replace(/[）]/g, ")");
+  const match = normalized.match(/\((非)?(\d{1,2}|十二|十一|十|九|八|七|六|五|四|三|二|一)月份?\)/);
+  if (!match) return null;
+
+  const chineseMonths: Readonly<Record<string, number>> = {
+    一: 1,
+    二: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+    十: 10,
+    十一: 11,
+    十二: 12,
+  };
+  const month = chineseMonths[match[2]] ?? Number(match[2]);
+  if (!Number.isInteger(month) || month < 1 || month > 12) return null;
+  return { month, excluded: Boolean(match[1]) };
+}
+
+export function contractCodeForMonth(mapping: InstrumentMapping, month: number, kind: InstrumentKind = "期货"): string {
+  const prefix = kind === "期权" && mapping.optionCode ? mapping.optionCode : contractCodePrefixForMapping(mapping);
+  const year = String(new Date().getFullYear()).slice(-2);
+  return `${prefix}${year}${String(month).padStart(2, "0")}`;
+}
+
 const EXCHANGE_CODE_BY_NAME: Readonly<Record<string, string>> = Object.freeze({
   "大连商品交易所": "DCE",
   "大商所": "DCE",
@@ -301,7 +340,10 @@ function monthOnlyContractCodes(text: string, mapping: InstrumentMapping): strin
 
 function codesForMapping(text: string, mapping: InstrumentMapping, kind: InstrumentKind): string[] {
   const explicit = explicitContractCodes(text, mapping, kind);
-  return explicit.length ? explicit : monthOnlyContractCodes(text, mapping);
+  if (explicit.length) return explicit;
+  const qualifier = productMonthQualifier(text);
+  if (qualifier) return qualifier.excluded ? [] : [contractCodeForMonth(mapping, qualifier.month, kind)];
+  return monthOnlyContractCodes(text, mapping);
 }
 
 function defaultCodes(mapping: InstrumentMapping, kind: InstrumentKind): string {

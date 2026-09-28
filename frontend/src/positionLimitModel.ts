@@ -1,8 +1,10 @@
 import {
+  contractCodeForMonth,
   contractCodePrefixForMapping,
   exchangeCodeForName,
   INSTRUMENT_MAPPINGS,
   normalizeInstrumentCodeForExchange,
+  productMonthQualifier,
   type InstrumentMapping,
 } from "./exceptionTradeModel";
 import type { Document, Scalar, SourceCellRef, TableSection } from "./types";
@@ -330,6 +332,19 @@ function resolveInstrumentCodes(
         mapped: true,
       };
     }
+  }
+  const monthQualifier = productMonthQualifier(productText);
+  if (monthQualifier && !monthQualifier.excluded && matches.length) {
+    return {
+      codes: [
+        ...new Set(
+          matches.map(({ mapping }) =>
+            normalizeInstrumentCodeForExchange(contractCodeForMonth(mapping, monthQualifier.month, kind), exchangeCode),
+          ),
+        ),
+      ],
+      mapped: true,
+    };
   }
   if (matches.length) {
     return {
