@@ -458,34 +458,75 @@ function smallChineseNumber(value: string): number | null {
   return null;
 }
 
-function parseDateEndpoint(value: string, start: boolean): { month: number; day: number; daytype: 0 | 1; ordertype: 0 | 1 } | null {
-  let text = compact(value).replace(/^[自从]/, "").replace(/期间.*$/, "").replace(/(起|开始)$/, "");
-  if (text.includes("合约挂牌") || text.includes("合约上市")) return { month: -1, day: -1, daytype: 0, ordertype: 0 };
-  if (text.includes("最后交易日")) return { month: -3, day: -1, daytype: 0, ordertype: 0 };
-  if (text === "交割月" || text === "交割月份") return { month: start ? -2 : -1, day: start ? -2 : -1, daytype: 0, ordertype: 0 };
+function deliveryMonthPeriod(value: string): number | null {
+  const match = value.match(/^交割月(?:份)?(?:前|之前)第?([0-9一二两三四五六七八九十]+)个?月$/);
+  return match ? smallChineseNumber(match[1]) : null;
+}
 
-  const monthMatch = text.match(/交割月(?:前|之前)?([0-9一二两三四五六七八九十]+)个?月/);
-  const month = monthMatch
-    ? (smallChineseNumber(monthMatch[1]) ?? -999)
-    : text.includes("交割月")
-      ? (start ? -2 : -1)
-      : -999;
+function parseDateEndpoint(
+  value: string,
+  start: boolean,
+): { month: number; day: number; daytype: 0 | 1; ordertype: 0 | 1 } | null {
+  let text = compact(value).replace(/^(自|从)/, "").replace(/期间.*$/, "").replace(/(起|开始)$/, "");
+  if (text.includes("合约挂牌") || text.includes("合约上市")) {
+    return { month: -1, day: -1, daytype: 0, ordertype: 0 };
+  }
+  if (text.includes("最后交易日") && !text.includes("交割月")) {
+    return { month: -3, day: -1, daytype: 0, ordertype: 0 };
+  }
+  if (text === "交割月" || text === "交割月份") {
+    return { month: start ? -2 : -1, day: start ? -2 : -1, daytype: 0, ordertype: 0 };
+  }
+
+  const monthMatch = text.match(/交割月(?:份)?(?:前|之前)?第?([0-9一二两三四五六七八九十]+)个?月/);
+  let month: number;
+  if (monthMatch) {
+    month = text.includes("前") || text.includes("之前") ? (smallChineseNumber(monthMatch[1]) ?? -999) : -2;
+  } else {
+    month = text.includes("交割月") ? (start ? -2 : -1) : -999;
+  }
   if (month === -999) return null;
 
   const daytype: 0 | 1 = text.includes("日历") ? 1 : 0;
-  let ordertype: 0 | 1 = text.includes("最后一个") || text.includes("最后") ? 1 : 0;
-  const dayMatch = text.match(/第(最后一个|[0-9一二两三四五六七八九十]+)个?(?:交易日|日历日|日)/);
-  if (!dayMatch) return null;
-  const day = dayMatch[1] === "最后一个" ? 1 : smallChineseNumber(dayMatch[1]);
-  if (day === null) return null;
-  if (dayMatch[1] === "最后一个") ordertype = 1;
-  return { month, day, daytype, ordertype };
+  const dayMatch = text.match(
+    /第?(最后(?:一个|个)?|[0-9一二两三四五六七八九十]+)个?(?:交易日|日历日|日)/,
+  );
+  if (dayMatch) {
+    const day = dayMatch[1].startsWith("最后") ? 1 : smallChineseNumber(dayMatch[1]);
+    if (day === null) return null;
+    return { month, day, daytype, ordertype: dayMatch[1].startsWith("最后") ? 1 : 0 };
+  }
+  if (monthMatch) return { month, day: start ? 1 : -1, daytype: 0, ordertype: 0 };
+  return null;
 }
 
 function parsePositionDateRule(value: string): PositionDateRule | undefined {
   const text = compact(value);
   if (text === "合约挂牌至交割月份" || text === "合约上市至交割月份") {
-    return { startmonth: -1, startday: -1, startdaytype: 0, endmonth: -1, endday: -1, enddaytype: 0, startordertype: 0, endordertype: 0 };
+    return {
+      startmonth: -1,
+      startday: -1,
+      startdaytype: 0,
+      endmonth: -1,
+      endday: -1,
+      enddaytype: 0,
+      startordertype: 0,
+      endordertype: 0,
+    };
+  }
+  const monthPeriod = deliveryMonthPeriod(text);
+  if (monthPeriod !== null) {
+    // Month-only columns continue after the previous bucket and span this whole month.
+    return {
+      startmonth: -2,
+      startday: -2,
+      startdaytype: 0,
+      endmonth: monthPeriod,
+      endday: -1,
+      enddaytype: 0,
+      startordertype: 0,
+      endordertype: 0,
+    };
   }
   let start: ReturnType<typeof parseDateEndpoint>;
   let end: ReturnType<typeof parseDateEndpoint>;
@@ -496,6 +537,9 @@ function parsePositionDateRule(value: string): PositionDateRule | undefined {
   } else if (text.includes("起")) {
     start = parseDateEndpoint(text, true);
     end = parseDateEndpoint("交割月", false);
+  } else if (text === "交割月" || text === "交割月份") {
+    start = parseDateEndpoint(text, true);
+    end = parseDateEndpoint(text, false);
   } else {
     return undefined;
   }

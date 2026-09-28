@@ -45,6 +45,77 @@ class FakeOracleWriter:
         return OracleWriteResult("9002", [], [], ["9301"])
 
 
+def test_write_uses_sequences_for_template_and_detail_ids(monkeypatch):
+    sequence_values = iter([9001, 9002])
+    sequence_names: list[str] = []
+    executed: list[tuple[str, dict[str, object]]] = []
+
+    class FakeConnection:
+        def execute(self, statement, parameters):
+            executed.append((str(statement), parameters))
+            return SimpleNamespace()
+
+    connection = FakeConnection()
+
+    class FakeTransaction:
+        def __enter__(self):
+            return connection
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeEngine:
+        def begin(self):
+            return FakeTransaction()
+
+    def fake_next_value(_connection, sequence_name):
+        sequence_names.append(sequence_name)
+        return next(sequence_values)
+
+    monkeypatch.setattr(oracle_import.OracleTemplateWriter, "_next_value", staticmethod(fake_next_value))
+    monkeypatch.setattr(
+        oracle_import.OracleTemplateWriter,
+        "_status_conflict",
+        staticmethod(lambda _connection, _template_type: False),
+    )
+
+    plan = ImportPlan(
+        run_id="run-1",
+        view="recognized",
+        document_sha256="a" * 64,
+        template_type="TEMP_OPENTOTALLIMIT",
+        template_name="测试模板",
+        remark="测试",
+        application_version="V260123",
+        position_rows=[],
+        open_total_rows=[
+            {
+                "instrument_id": "IO",
+                "limit_volume": 100,
+                "limit_warn_volume": 80,
+                "is_product": 0,
+                "is_opt": 1,
+                "only_depth": 1,
+            }
+        ],
+        fingerprint="f" * 64,
+        creator_id=123456,
+    )
+
+    result = oracle_import.OracleTemplateWriter(Settings(), engine=FakeEngine()).write(plan)
+
+    assert sequence_names == ["TEMP_RELEASE_RECORD_SEQ", "TEMP_OPENTOTALLIMIT_SEQ"]
+    assert result.template_id == "9001"
+    assert result.open_total_ids == ["9002"]
+    release_sql, release_parameters = executed[0]
+    detail_sql, detail_parameters = executed[1]
+    assert "(ID, TEMPLATE_TYPE" in release_sql
+    assert "RETURNING" not in release_sql
+    assert release_parameters["id"] == 9001
+    assert "INSERT INTO TEMP_OPENTOTALLIMIT (ID, TEMPLATEID" in detail_sql
+    assert detail_parameters["id"] == 9002
+
+
 def _persist_successful_run(app) -> tuple[str, str, dict]:
     store = app.state.artifact_store
     source_id = str(uuid4())
@@ -465,3 +536,100 @@ def test_open_total_validation_rejects_bad_warning(tmp_path):
     )
     _, issues = build_import_plan("run-3", {"sections": []}, request, settings)
     assert any(issue.code == "warning_exceeds_limit" for issue in issues)
+
+
+def test_import_maps_the_date_headings_reported_by_the_option_limit_table():
+    settings = Settings(oracle_creator_id=7)
+    date_rules = [
+        {
+            "startmonth": -1,
+            "startday": -1,
+            "startdaytype": 0,
+            "endmonth": 2,
+            "endday": 1,
+            "enddaytype": 0,
+            "startordertype": 0,
+            "endordertype": 1,
+        },
+        {
+            "startmonth": -2,
+            "startday": -2,
+            "startdaytype": 0,
+            "endmonth": 1,
+            "endday": -1,
+            "enddaytype": 0,
+            "startordertype": 0,
+            "endordertype": 0,
+        },
+        {
+            "startmonth": -2,
+            "startday": -2,
+            "startdaytype": 0,
+            "endmonth": -1,
+            "endday": -1,
+            "enddaytype": 0,
+            "startordertype": 0,
+            "endordertype": 0,
+        },
+        {
+            "startmonth": -2,
+            "startday": -2,
+            "startdaytype": 0,
+            "endmonth": 2,
+            "endday": -1,
+            "enddaytype": 0,
+            "startordertype": 0,
+            "endordertype": 0,
+        },
+        {
+            "startmonth": -1,
+            "startday": -1,
+            "startdaytype": 0,
+            "endmonth": 3,
+            "endday": 1,
+            "enddaytype": 0,
+            "startordertype": 0,
+            "endordertype": 1,
+        },
+    ]
+    holding_dates = [
+        "合约挂牌至交割月前第二月的最后\n个交易日",
+        "交割月前第一月",
+        "交割月",
+        "交割月份前第二月",
+        "合约挂牌至交割月前第三月的最后一个交易日",
+    ]
+    request = DatabaseImportRequest(
+        documentSha256="a" * 64,
+        templateType="TEMP_POSITIONLIMIT_DETAIL",
+        positionRows=[
+            {
+                "type": "期权",
+                "exchange": "上海期货交易所",
+                "exchangeCode": "SHFE",
+                "instrument": "CU",
+                "productId": "CU",
+                "direction": "所有",
+                "hedge": "所有",
+                "holdingDate": holding_date,
+                "dateRule": date_rule,
+                "totalPosition": "0<=持仓量<+∞",
+                "limitRule": "固定值3000",
+            }
+            for holding_date, date_rule in zip(holding_dates, date_rules)
+        ],
+    )
+
+    plan, issues = build_import_plan("run-option-date-rules", {"sections": []}, request, settings)
+
+    assert issues == []
+    assert [
+        {key: row[key] for key in ("startmonth", "startday", "endmonth", "endday", "endordertype")}
+        for row in plan.position_rows
+    ] == [
+        {"startmonth": -1, "startday": -1, "endmonth": 2, "endday": 1, "endordertype": 1},
+        {"startmonth": -2, "startday": -2, "endmonth": 1, "endday": -1, "endordertype": 0},
+        {"startmonth": -2, "startday": -2, "endmonth": -1, "endday": -1, "endordertype": 0},
+        {"startmonth": -2, "startday": -2, "endmonth": 2, "endday": -1, "endordertype": 0},
+        {"startmonth": -1, "startday": -1, "endmonth": 3, "endday": 1, "endordertype": 1},
+    ]

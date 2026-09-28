@@ -434,18 +434,32 @@ def _small_chinese_number(value: str) -> int | None:
     return None
 
 
+def _delivery_month_period(value: str) -> int | None:
+    match = re.fullmatch(
+        r"交割月(?:份)?(?:前|之前)第?(?P<months>[0-9一二两三四五六七八九十]+)个?月",
+        value,
+    )
+    if match is None:
+        return None
+    return _small_chinese_number(match.group("months"))
+
+
 def _parse_date_endpoint(value: str, *, start: bool) -> dict[str, int] | None:
-    text_value = _compact(value).replace("自", "").replace("从", "").replace("期间", "")
+    text_value = re.sub(r"^(自|从)", "", _compact(value))
+    text_value = re.sub(r"期间.*$", "", text_value)
     text_value = re.sub(r"(起|开始)$", "", text_value)
 
     if "合约挂牌" in text_value or "合约上市" in text_value:
         return {"month": -1, "day": -1, "daytype": 0, "ordertype": 0}
-    if "最后交易日" in text_value:
+    if "最后交易日" in text_value and "交割月" not in text_value:
         return {"month": -3, "day": -1, "daytype": 0, "ordertype": 0}
     if text_value in {"交割月", "交割月份"}:
         return {"month": -2 if start else -1, "day": -2 if start else -1, "daytype": 0, "ordertype": 0}
 
-    month_match = re.search(r"交割月(?:前|之前)?(?P<months>[0-9一二两三四五六七八九十]+)个?月", text_value)
+    month_match = re.search(
+        r"交割月(?:份)?(?:前|之前)?第?(?P<months>[0-9一二两三四五六七八九十]+)个?月",
+        text_value,
+    )
     if not month_match and "交割月" in text_value:
         month_value = -2 if start else -1
     elif month_match:
@@ -458,16 +472,19 @@ def _parse_date_endpoint(value: str, *, start: bool) -> dict[str, int] | None:
 
     day_type = 1 if "日历" in text_value else 0
     order_type = 1 if "最后一个" in text_value or "最后" in text_value else 0
-    day_match = re.search(r"第(?P<day>最后一个|[0-9一二两三四五六七八九十]+)个?(?:交易日|日历日|日)", text_value)
+    day_match = re.search(
+        r"第?(?P<day>最后(?:一个|个)?|[0-9一二两三四五六七八九十]+)个?(?:交易日|日历日|日)",
+        text_value,
+    )
     if day_match:
-        if day_match.group("day") == "最后一个":
-            day = 1
-            order_type = 1
-        else:
-            day = _small_chinese_number(day_match.group("day"))
-            if day is None:
-                return None
-        return {"month": month_value, "day": day, "daytype": day_type, "ordertype": order_type}
+        if day_match.group("day").startswith("最后"):
+            return {"month": month_value, "day": 1, "daytype": day_type, "ordertype": 1}
+        day = _small_chinese_number(day_match.group("day"))
+        if day is not None:
+            return {"month": month_value, "day": day, "daytype": day_type, "ordertype": order_type}
+        return None
+    if month_match:
+        return {"month": month_value, "day": 1 if start else -1, "daytype": 0, "ordertype": 0}
     if "最后一个日历日" in text_value:
         return {"month": month_value, "day": 1, "daytype": 1, "ordertype": 1}
     return None
@@ -481,6 +498,20 @@ def parse_date_rule(value: str) -> PositionDateRule | None:
             startday=-1,
             startdaytype=0,
             endmonth=-1,
+            endday=-1,
+            enddaytype=0,
+            startordertype=0,
+            endordertype=0,
+        )
+
+    month_period = _delivery_month_period(text_value)
+    if month_period is not None:
+        # Month-only columns continue after the previous bucket and span this whole month.
+        return PositionDateRule(
+            startmonth=-2,
+            startday=-2,
+            startdaytype=0,
+            endmonth=month_period,
             endday=-1,
             enddaytype=0,
             startordertype=0,

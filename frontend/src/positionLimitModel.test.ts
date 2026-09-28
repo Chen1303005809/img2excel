@@ -108,4 +108,94 @@ describe("position limit table", () => {
       ]),
     );
   });
+
+  it("maps the date headings reported by the option-limit import", () => {
+    const document = fixtureDocument();
+    document.title = "上海期货交易所期权限仓";
+    document.sections = [
+      section("T03", "T03 上海期货交易所", [
+        [
+          "",
+          "合约挂牌至交割月前第二月的最后\n个交易日",
+          "交割月前第一月",
+          "交割月",
+          "交割月份前第二月",
+          "合约挂牌至交割月前第三月的最后一个交易日",
+        ],
+        ["铜", "8000", "3000", "2000", "1000", "500"],
+      ]),
+    ];
+
+    const table = extractPositionLimitTable(document);
+
+    expect(table.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          holdingDate: "合约挂牌至交割月前第二月的最后个交易日",
+          dateRule: {
+            startmonth: -1,
+            startday: -1,
+            startdaytype: 0,
+            endmonth: 2,
+            endday: 1,
+            enddaytype: 0,
+            startordertype: 0,
+            endordertype: 1,
+          },
+        }),
+        expect.objectContaining({
+          holdingDate: "交割月前第一月",
+          dateRule: {
+            startmonth: -2,
+            startday: -2,
+            startdaytype: 0,
+            endmonth: 1,
+            endday: -1,
+            enddaytype: 0,
+            startordertype: 0,
+            endordertype: 0,
+          },
+        }),
+        expect.objectContaining({
+          holdingDate: "交割月",
+          dateRule: {
+            startmonth: -2,
+            startday: -2,
+            startdaytype: 0,
+            endmonth: -1,
+            endday: -1,
+            enddaytype: 0,
+            startordertype: 0,
+            endordertype: 0,
+          },
+        }),
+        expect.objectContaining({
+          holdingDate: "交割月份前第二月",
+          dateRule: {
+            startmonth: -2,
+            startday: -2,
+            startdaytype: 0,
+            endmonth: 2,
+            endday: -1,
+            enddaytype: 0,
+            startordertype: 0,
+            endordertype: 0,
+          },
+        }),
+        expect.objectContaining({
+          holdingDate: "合约挂牌至交割月前第三月的最后一个交易日",
+          dateRule: {
+            startmonth: -1,
+            startday: -1,
+            startdaytype: 0,
+            endmonth: 3,
+            endday: 1,
+            enddaytype: 0,
+            startordertype: 0,
+            endordertype: 1,
+          },
+        }),
+      ]),
+    );
+  });
 });
