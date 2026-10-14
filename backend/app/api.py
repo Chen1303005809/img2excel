@@ -9,7 +9,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, desc, select, update
+from sqlalchemy import delete, desc, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -27,11 +27,14 @@ from .exporters import ExportContext, ExporterRegistry
 from .models import (
     Artifact,
     DatabaseImportBatch,
+    DatabaseImportBatchRun,
     DatabaseImportIssue,
     DocumentRevision,
     ImageCandidate,
     Run,
+    RunBatch,
     Source,
+    SourceGroup,
     utc_now,
 )
 from .oracle_import import (
@@ -45,7 +48,7 @@ from .oracle_import import (
     build_import_plan,
     source_documents_digest,
 )
-from .scheduling import DEFAULT_SCHEDULE_INTERVAL_MINUTES, create_queued_run, schedule_next_at
+from .scheduling import DEFAULT_SCHEDULE_INTERVAL_MINUTES, create_queued_run, create_run_batch, schedule_next_at
 from .url_utils import InvalidSourceUrl, default_source_name, normalize_url, validate_fetch_host
 
 
@@ -64,6 +67,11 @@ class SourceUpdate(BaseModel):
     url: str | None = None
     name: str | None = Field(default=None, max_length=200)
     enabled: bool | None = None
+    schedule_enabled: bool | None = None
+    schedule_interval_minutes: int | None = Field(default=None, ge=1, le=43_200)
+
+
+class SourceGroupUpdate(BaseModel):
     schedule_enabled: bool | None = None
     schedule_interval_minutes: int | None = Field(default=None, ge=1, le=43_200)
 
@@ -103,6 +111,29 @@ def _source_payload(source: Source, latest_run: Run | None = None) -> dict[str, 
         "created_at": _iso(source.created_at),
         "updated_at": _iso(source.updated_at),
         "latest_run": _run_summary(latest_run) if latest_run else None,
+    }
+
+
+def _source_group_payload(session: Session, group: SourceGroup) -> dict[str, Any]:
+    sources = [
+        session.get(Source, group.future_source_id),
+        session.get(Source, group.option_source_id),
+    ]
+    source_payloads = []
+    for source in sources:
+        if source is None:
+            continue
+        latest = session.scalar(
+            select(Run).where(Run.source_id == source.id).order_by(desc(Run.created_at)).limit(1)
+        )
+        source_payloads.append(_source_payload(source, latest))
+    return {
+        "id": group.id,
+        "name": group.name,
+        "schedule_enabled": group.schedule_enabled,
+        "schedule_interval_minutes": group.schedule_interval_minutes,
+        "next_run_at": _iso(group.next_run_at),
+        "sources": source_payloads,
     }
 
 
@@ -170,6 +201,13 @@ def _run_payload(session: Session, run: Run, store: ArtifactStore) -> dict[str, 
     candidates = list(session.scalars(select(ImageCandidate).where(ImageCandidate.run_id == run.id).order_by(ImageCandidate.ordinal)))
     artifacts = list(session.scalars(select(Artifact).where(Artifact.run_id == run.id).order_by(Artifact.created_at)))
     revision = session.scalar(select(DocumentRevision).where(DocumentRevision.run_id == run.id).order_by(desc(DocumentRevision.revision_number)))
+    run_batch = session.get(RunBatch, run.run_batch_id) if run.run_batch_id else None
+    associated_batch_ids = select(DatabaseImportBatchRun.batch_id).where(DatabaseImportBatchRun.run_id == run.id)
+    import_conditions = [DatabaseImportBatch.run_id == run.id, DatabaseImportBatch.id.in_(associated_batch_ids)]
+    if run.run_batch_id:
+        import_conditions.append(DatabaseImportBatch.run_batch_id == run.run_batch_id)
+    import_query = select(DatabaseImportBatch).where(or_(*import_conditions))
+    import_batches = list(session.scalars(import_query.order_by(desc(DatabaseImportBatch.created_at)).limit(20)))
     return {
         "id": run.id,
         "source_id": run.source_id,
@@ -178,6 +216,24 @@ def _run_payload(session: Session, run: Run, store: ArtifactStore) -> dict[str, 
         "final_url": run.final_url,
         "profile_key": run.profile_key,
         "baseline_run_id": run.baseline_run_id,
+        "run_batch_id": run.run_batch_id,
+        "trigger_type": run_batch.trigger_type if run_batch else "manual",
+        "run_batch": (
+            {
+                "id": run_batch.id,
+                "kind": run_batch.kind,
+                "status": run_batch.status,
+                "trigger_type": run_batch.trigger_type,
+                "auto_import_status": run_batch.auto_import_status,
+                "auto_import_message": run_batch.auto_import_message,
+                "import_batch_id": run_batch.import_batch_id,
+                "created_at": _iso(run_batch.created_at),
+                "finished_at": _iso(run_batch.finished_at),
+            }
+            if run_batch
+            else None
+        ),
+        "database_imports": [_database_import_payload(session, item) for item in import_batches],
         "status": run.status,
         "stage": run.stage,
         "progress": run.progress,
@@ -258,6 +314,9 @@ def _database_import_payload(session: Session, batch: DatabaseImportBatch) -> di
         "counts": batch.counts,
         "used_derived_warning": batch.used_derived_warning,
         "target_template_ids": batch.target_template_ids,
+        "replaced_template_ids": batch.replaced_template_ids,
+        "origin": batch.origin,
+        "run_batch_id": batch.run_batch_id,
         "error_message": batch.error_message,
         "created_at": _iso(batch.created_at),
         "updated_at": _iso(batch.updated_at),
@@ -294,6 +353,22 @@ def _store_database_import_issues(session: Session, batch_id: str, issues: list[
     )
 
 
+def _link_database_import_runs(session: Session, batch_id: str, run_ids: list[str]) -> None:
+    existing = set(
+        session.scalars(
+            select(DatabaseImportBatchRun.run_id).where(
+                DatabaseImportBatchRun.batch_id == batch_id,
+                DatabaseImportBatchRun.run_id.in_(run_ids),
+            )
+        )
+    ) if run_ids else set()
+    session.add_all(
+        DatabaseImportBatchRun(batch_id=batch_id, run_id=run_id)
+        for run_id in dict.fromkeys(run_ids)
+        if run_id not in existing
+    )
+
+
 def build_router(
     session_factory: sessionmaker,
     store: ArtifactStore,
@@ -309,6 +384,21 @@ def build_router(
         with session_factory() as session:
             yield session
 
+    def queue_position_group(session: Session, group: SourceGroup, trigger_type: str) -> list[Run]:
+        sources = [session.get(Source, group.future_source_id), session.get(Source, group.option_source_id)]
+        if any(source is None for source in sources):
+            raise HTTPException(status_code=409, detail="期货与期权限仓来源组配置不完整")
+        concrete_sources = [source for source in sources if source is not None]
+        if any(not source.enabled for source in concrete_sources):
+            raise HTTPException(status_code=409, detail="期货与期权限仓两个来源都必须启用")
+        batch = create_run_batch(
+            session,
+            kind="position_pair",
+            trigger_type=trigger_type,
+            source_group_id=group.id,
+        )
+        return [create_queued_run(session, source, run_batch_id=batch.id) for source in concrete_sources]
+
     @router.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -321,6 +411,38 @@ def build_router(
             latest = session.scalar(select(Run).where(Run.source_id == source.id).order_by(desc(Run.created_at)).limit(1))
             payload.append(_source_payload(source, latest))
         return payload
+
+    @router.get("/source-groups")
+    def list_source_groups(session: Session = Depends(db)) -> list[dict[str, Any]]:
+        groups = list(session.scalars(select(SourceGroup).order_by(SourceGroup.created_at)))
+        return [_source_group_payload(session, group) for group in groups]
+
+    @router.patch("/source-groups/{group_id}")
+    def update_source_group(group_id: str, body: SourceGroupUpdate, session: Session = Depends(db)) -> dict[str, Any]:
+        group = session.get(SourceGroup, group_id)
+        if group is None:
+            raise HTTPException(status_code=404, detail="source group not found")
+        if body.schedule_interval_minutes is not None:
+            group.schedule_interval_minutes = body.schedule_interval_minutes
+        if body.schedule_enabled is not None:
+            group.schedule_enabled = body.schedule_enabled
+        now = utc_now()
+        group.next_run_at = schedule_next_at(now, group.schedule_interval_minutes) if group.schedule_enabled else None
+        group.updated_at = now
+        session.commit()
+        return _source_group_payload(session, group)
+
+    @router.post("/source-groups/{group_id}/runs", status_code=201)
+    def create_source_group_run(group_id: str, session: Session = Depends(db)) -> dict[str, Any]:
+        group = session.get(SourceGroup, group_id)
+        if group is None:
+            raise HTTPException(status_code=404, detail="source group not found")
+        runs = queue_position_group(session, group, "manual")
+        session.commit()
+        return {
+            "run_batch_id": runs[0].run_batch_id if runs else None,
+            "runs": [_run_payload(session, run, store) for run in runs],
+        }
 
     @router.post("/sources", status_code=201)
     def create_source(body: SourceCreate, session: Session = Depends(db)) -> dict[str, Any]:
@@ -354,6 +476,12 @@ def build_router(
         if source is None:
             raise HTTPException(status_code=404, detail="source not found")
         schedule_changed = body.schedule_enabled is not None or body.schedule_interval_minutes is not None
+        if schedule_changed and session.scalar(
+            select(SourceGroup).where(
+                or_(SourceGroup.future_source_id == source_id, SourceGroup.option_source_id == source_id)
+            )
+        ) is not None:
+            raise HTTPException(status_code=409, detail="期货与期权限仓已使用共享周期，请更新来源组设置")
         if body.url is not None:
             try:
                 normalized = normalize_url(body.url)
@@ -391,6 +519,16 @@ def build_router(
             raise HTTPException(status_code=404, detail="source not found")
         if not source.enabled:
             raise HTTPException(status_code=409, detail="source is disabled")
+        group = session.scalar(
+            select(SourceGroup).where(
+                or_(SourceGroup.future_source_id == source_id, SourceGroup.option_source_id == source_id)
+            )
+        )
+        if group is not None:
+            runs = queue_position_group(session, group, "manual")
+            session.commit()
+            selected = next((item for item in runs if item.source_id == source_id), runs[0])
+            return _run_payload(session, selected, store)
         run = create_queued_run(session, source)
         session.commit()
         session.refresh(run)
@@ -510,6 +648,16 @@ def build_router(
             raise HTTPException(status_code=404, detail="run not found")
         if run.status != "succeeded":
             raise HTTPException(status_code=409, detail="only a successful run can be imported")
+        if run.run_batch_id:
+            run_batch = session.get(RunBatch, run.run_batch_id)
+            if run_batch is not None and run_batch.trigger_type == "scheduled" and run_batch.auto_import_status in {
+                "pending",
+                "waiting_for_runs",
+                "preflighting",
+                "preflight_succeeded",
+                "committing",
+            }:
+                raise HTTPException(status_code=409, detail="定时批次正在自动导入，请稍后查看运行详情")
 
         requested_sources = body.source_documents or [
             ImportSourceDocumentRequest(run_id=run_id, view=body.view, document_sha256=body.document_sha256)
@@ -590,6 +738,11 @@ def build_router(
             if duplicate.status == "committed":
                 raise HTTPException(status_code=409, detail="相同运行、文档和实体指纹已经成功导入")
             if duplicate.status in {"preflight_succeeded", "committing"}:
+                duplicate.origin = "manual"
+                duplicate.run_batch_id = run.run_batch_id
+                _link_database_import_runs(session, duplicate.id, source_ids)
+                session.commit()
+                session.refresh(duplicate)
                 return _database_import_payload(session, duplicate)
 
         if not issues:
@@ -600,6 +753,7 @@ def build_router(
 
         if duplicate is not None:
             duplicate.revision_id = primary_revision.id if len(source_documents) == 1 and primary_revision else None
+            duplicate.origin = "manual"
             duplicate.view = plan.view
             duplicate.template_type = plan.template_type
             duplicate.template_name = plan.template_name
@@ -613,8 +767,10 @@ def build_router(
             duplicate.error_message = None
             duplicate.committed_at = None
             duplicate.updated_at = utc_now()
+            duplicate.run_batch_id = session.get(Run, run_id).run_batch_id if session.get(Run, run_id) else None
             session.execute(delete(DatabaseImportIssue).where(DatabaseImportIssue.batch_id == duplicate.id))
             _store_database_import_issues(session, duplicate.id, issues)
+            _link_database_import_runs(session, duplicate.id, source_ids)
             session.commit()
             session.refresh(duplicate)
             return _database_import_payload(session, duplicate)
@@ -622,6 +778,8 @@ def build_router(
         batch = DatabaseImportBatch(
             id=str(uuid4()),
             run_id=batch_run_id,
+            run_batch_id=session.get(Run, run_id).run_batch_id if session.get(Run, run_id) else None,
+            origin="manual",
             revision_id=primary_revision.id if len(source_documents) == 1 and primary_revision else None,
             view=plan.view,
             template_type=plan.template_type,
@@ -636,6 +794,7 @@ def build_router(
         )
         session.add(batch)
         _store_database_import_issues(session, batch.id, issues)
+        _link_database_import_runs(session, batch.id, source_ids)
         try:
             session.commit()
         except IntegrityError as error:
@@ -663,6 +822,8 @@ def build_router(
         batch = session.get(DatabaseImportBatch, batch_id)
         if batch is None:
             raise HTTPException(status_code=404, detail="database import batch not found")
+        if batch.origin == "scheduled":
+            raise HTTPException(status_code=409, detail="定时自动导入批次由 Worker 提交")
         if batch.status == "committed":
             return _database_import_payload(session, batch)
         if batch.status != "preflight_succeeded":

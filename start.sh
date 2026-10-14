@@ -48,9 +48,17 @@ UVICORN_LOG_LEVEL="${IMAGE_TABLE_LOG_LEVEL:-info}"
 
 cd "${PROJECT_ROOT}"
 
-if ! PYTHON_BIN="$(command -v python)" || [[ ! -x "${PYTHON_BIN}" ]]; then
-  echo "未找到当前环境的 Python 解释器。" >&2
-  echo "请先激活已安装项目依赖的 Conda 环境。" >&2
+if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
+  PYTHON_BIN="${PROJECT_ROOT}/.venv/bin/python"
+elif ! PYTHON_BIN="$(command -v python)" || [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "未找到 Python 3.12 解释器。" >&2
+  echo "请先创建项目虚拟环境：python3.12 -m venv .venv" >&2
+  exit 1
+fi
+
+if ! "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)'; then
+  echo "当前 Python 版本不是 3.12：$(${PYTHON_BIN} --version)" >&2
+  echo "请使用项目虚拟环境 .venv，或激活 Python 3.12 环境。" >&2
   exit 1
 fi
 
@@ -186,7 +194,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.app.config import get_settings
 from backend.app.database import build_engine, run_migrations
 from backend.app.models import Base
-from backend.app.seed import seed_sources
+from backend.app.seed import seed_source_groups, seed_sources
 
 settings = get_settings()
 run_migrations(settings)
@@ -196,6 +204,7 @@ try:
     session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     with session_factory() as session:
         seed_sources(session)
+        seed_source_groups(session)
 finally:
     engine.dispose()
 

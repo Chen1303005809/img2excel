@@ -12,7 +12,7 @@ from .config import Settings, get_settings
 from .database import build_engine, run_migrations
 from .models import Base
 from .oracle_import import OracleWriter
-from .seed import seed_sources
+from .seed import seed_source_groups, seed_sources
 
 
 def create_app(settings: Settings | None = None, oracle_writer: OracleWriter | None = None) -> FastAPI:
@@ -30,6 +30,7 @@ def create_app(settings: Settings | None = None, oracle_writer: OracleWriter | N
         Base.metadata.create_all(engine)
         with session_factory() as session:
             seed_sources(session)
+            seed_source_groups(session)
         yield
         engine.dispose()
 

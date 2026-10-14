@@ -4,7 +4,7 @@
 
 ## 运行环境
 
-- Python 3.12，使用系统默认解释器 `python`
+- Python 3.12，推荐使用项目虚拟环境 `.venv`
 - Node.js 20+
 - Crawl4AI 所需的 Chromium 浏览器
 
@@ -12,6 +12,8 @@
 
 ```bash
 cp .env.example .env  # 首次运行时复制，并按需修改端口
+python3.12 -m venv .venv
+. .venv/bin/activate
 python -m pip install -r requirements-app.txt
 CRAWL4_AI_BASE_DIRECTORY="$PWD/data/.crawl4ai" crawl4ai-setup   # 如果本机还没有 Crawl4AI 浏览器
 cd frontend && npm install
@@ -67,12 +69,12 @@ cd frontend && npm run dev
 | `IMAGE_TABLE_ORACLE_APPLICATION_VERSION` | `V260123` | 写入模板头表的功能版本号 |
 | `IMAGE_TABLE_ORACLE_IMPORT_TIMEOUT_SECONDS` | `30` | Oracle TCP 连接、调用和连接池超时 |
 
-定时抓取在“来源管理”中按来源配置。勾选“自动”，输入抓取间隔（1–43,200 分钟）后失焦保存；Worker 会在下一次到期时自动创建运行记录。停用来源或取消“自动”后不会再创建定时任务，已排队的运行仍会正常处理。
+定时抓取在“来源管理”中配置。804 期货限仓和 805 期权限仓共用一个周期和开关，到期后同时创建两条关联运行；迁移会取原有两个周期中较长的一个，只有原先两边都开启时才默认开启共享定时。970 开仓总量限制保留独立周期。停用来源或关闭定时后不会再创建新的定时任务，已排队的运行仍会正常处理。
 
 ## 业务流程
 
 1. 来源页添加或停用网址，规范化后的 URL 保证同一来源不重复。
-2. 点击“立即运行”，API 只创建 `queued` 记录；Worker 负责后续阶段。开启来源的定时抓取后，Worker 也会按来源配置自动创建 `queued` 记录。
+2. 点击 804/805 的“立即运行两页”会创建同一批次的两条 `queued` 记录；手动运行仍由人工预校验并确认导入。限仓组或 970 的定时任务完成识别后，会自动预校验并提交数据库导入。
 3. Crawl4AI 按 `yafco_image` 页面配置等待 `.ya-con img`，从 `.ya-con img[src]` 提取候选图片。
 4. 0 张图片会失败；1 张自动识别；多张进入候选选择，避免静默选错。
 5. 识别结果保留 `image_to_rows` v2 文档，并封装为 `schema_version=1` 的运行文档；所有识别单元格按原文字符串保存（百分数不会转换成小数），生成表格时会把相邻的空白单元格合并为矩形结构。
@@ -81,7 +83,7 @@ cd frontend && npm run dev
 8. 修订写入 `revisions/`，原始识别 JSON/XLSX 永不覆盖。下一次运行默认比较上一条成功运行的原始 OCR 文档。
 9. 识别到“异常交易监管阈值/交易限额”表时，数据面板会额外生成标准化的异常交易开仓总量表：直接从既有识别表格的“交易限额”单元格提取品种/合约和单日最大开仓量，再通过前端静态映射补全交易所与代码；原始识别表格仍可展开核对。原图未提供独立预警线，因此当前页面按最大开仓量的 80% 展示预警值。
 10. 识别到“交易所期货/期权限仓”表时，数据面板会额外生成标准化的持仓限仓表：按交易所、品种/合约、持仓日期、总持仓量和固定/百分比限仓规则展开，并把无法映射的品种保留在提示中；原始识别表格仍可展开核对。
-11. 导入期货或期权限仓时，先选择另一类限仓来源的一次成功运行，系统把两份识别/修订结果合并为一个限仓批次，并记录两边的来源运行和文档哈希。后端校验来源状态、文档版本、静态代码映射、日期哨兵、数值范围和目标 Oracle 权限；通过后由用户确认创建一个草稿临时模板，将两类明细及梯度在同一个 Oracle 事务中写入。异常交易开仓总量仍按独立模板导入；本地 SQLite 保留导入批次和逐行错误审计。
+11. 手动导入期货或期权限仓时，仍可选择另一类限仓来源的一次成功运行，系统把两份识别/修订结果合并为一个批次，后端预校验通过后等待人工确认。定时批次会使用前端相同的实体提取和字段校验规则自动导入；如果 Oracle 中同类型临时模板与已提交的定时导入审计记录及模板 ID 相符，写入事务会先删除旧模板明细再写入新模板。人工创建或无法追溯来源的冲突模板会阻止本次导入。运行详情保留预校验问题、导入状态、错误、模板 ID 和被替换模板 ID；导入失败不会改变成功的识别状态。
 
 运行产物结构：
 
@@ -101,7 +103,8 @@ data/runs/<run_id>/
 后端 API 前缀为 `/api`，主要接口如下：
 
 - `GET/POST /api/sources`、`PATCH /api/sources/{source_id}`
-- `POST /api/sources/{source_id}/runs`
+- `POST /api/sources/{source_id}/runs`（804/805 来源会成组运行）
+- `GET/PATCH /api/source-groups`、`POST /api/source-groups/{group_id}/runs`
 - `GET /api/runs`、`GET /api/runs/{run_id}`
 - `POST /api/runs/{run_id}/image-selection`
 - `GET /api/runs/{run_id}/document?view=recognized|revised`
@@ -111,9 +114,9 @@ data/runs/<run_id>/
 - `GET /api/artifacts/{artifact_id}/download`
 - `GET /api/health`
 
-`POST /api/sources` 和 `PATCH /api/sources/{source_id}` 支持 `schedule_enabled`、`schedule_interval_minutes`；来源响应会返回 `next_run_at`。例如：`{"schedule_enabled": true, "schedule_interval_minutes": 30}` 表示每 30 分钟自动抓取一次。
+普通来源仍可通过 `POST /api/sources` 和 `PATCH /api/sources/{source_id}` 配置 `schedule_enabled`、`schedule_interval_minutes`。804/805 使用来源组接口配置共享周期，来源组及运行响应会返回 `next_run_at`、`run_batch_id` 和自动导入状态。
 
-`DocumentExporter` 是扩展边界，当前注册 JSON 和 XLSX；未来可增加数据库写入适配器，而不改变抓取、OCR 和历史对比契约。
+`DocumentExporter` 当前注册 JSON 和 XLSX；数据库导入由共享的预校验与 Oracle 写入服务处理，不改变抓取、OCR 和历史对比契约。
 
 异常交易品种、交易所与代码的官方资料核对记录见 [`research_sources_static_mapping.md`](research_sources_static_mapping.md)；交易限额本身仍应以交易所最新公告为准。
 

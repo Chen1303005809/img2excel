@@ -243,6 +243,7 @@ class ImportPlan:
     fingerprint: str
     creator_id: int | None = None
     source_documents: list[dict[str, Any]] = field(default_factory=list)
+    replace_template_ids: list[str] = field(default_factory=list)
 
     @property
     def counts(self) -> dict[str, int]:
@@ -269,6 +270,7 @@ class ImportPlan:
             "position_rows": self.position_rows,
             "open_total_rows": self.open_total_rows,
             "source_documents": self.source_documents,
+            "replace_template_ids": self.replace_template_ids,
             "fingerprint": self.fingerprint,
             "creator_id": self.creator_id,
         }
@@ -288,6 +290,7 @@ class ImportPlan:
             fingerprint=str(payload["fingerprint"]),
             creator_id=int(payload["creator_id"]) if payload.get("creator_id") is not None else None,
             source_documents=list(payload.get("source_documents", [])),
+            replace_template_ids=[str(value) for value in payload.get("replace_template_ids", [])],
         )
 
 
@@ -295,6 +298,7 @@ class ImportPlan:
 class OraclePreflightResult:
     creator_id: int | None
     issues: list[ImportIssue]
+    blocking_template_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -998,13 +1002,15 @@ class OracleTemplateWriter:
         return self._engine
 
     @staticmethod
-    def _status_conflict(connection: Any, template_type: str) -> bool:
+    def _blocking_template_ids(connection: Any, template_type: str) -> list[str]:
         statement = text(
             "SELECT ID FROM TEMP_RELEASE_RECORD "
             "WHERE TEMPLATE_TYPE = :template_type "
-            "AND PUBLISH_STATUS IN (0, 1, 2) AND ROWNUM = 1"
+            "AND PUBLISH_STATUS IN (0, 1, 2)"
         )
-        return connection.execute(statement, {"template_type": template_type}).first() is not None
+        result = connection.execute(statement, {"template_type": template_type})
+        rows = result.fetchall() if hasattr(result, "fetchall") else []
+        return [str(row[0]) for row in rows]
 
     def _resolve_creator(self, connection: Any) -> int | None:
         if self.settings.oracle_creator_id is not None:
@@ -1063,9 +1069,14 @@ class OracleTemplateWriter:
                 creator_id = self._resolve_creator(connection)
                 if creator_id is None:
                     issues.append(_issue("target", -1, "CREATOR", "creator_mapping_missing", "Oracle当前用户无法映射到业务用户ID"))
-                if not issues and self._status_conflict(connection, plan.template_type):
+                blocking_template_ids = self._blocking_template_ids(connection, plan.template_type) if not issues else []
+                if not issues and blocking_template_ids:
                     issues.append(_issue("target", -1, "PUBLISH_STATUS", "draft_template_conflict", "该模板类型已有编制中、待审核或已拒绝模板"))
-                return OraclePreflightResult(creator_id=creator_id, issues=issues)
+                return OraclePreflightResult(
+                    creator_id=creator_id,
+                    issues=issues,
+                    blocking_template_ids=blocking_template_ids,
+                )
         except Exception as error:
             return OraclePreflightResult(
                 creator_id=None,
@@ -1084,8 +1095,17 @@ class OracleTemplateWriter:
         open_total_ids: list[str] = []
         try:
             with engine.begin() as connection:
-                if self._status_conflict(connection, plan.template_type):
-                    raise OracleImportError("目标库已有未完成的同类型临时模板")
+                blocking_template_ids = self._blocking_template_ids(connection, plan.template_type)
+                expected_replacements = sorted(str(value) for value in plan.replace_template_ids)
+                if sorted(blocking_template_ids) != expected_replacements:
+                    if blocking_template_ids:
+                        raise OracleImportError(
+                            f"目标库存在未授权替换的同类型临时模板（ID：{', '.join(sorted(blocking_template_ids))}），请重新预校验"
+                        )
+                    if expected_replacements:
+                        raise OracleImportError("待替换的临时模板状态已变化，请重新预校验")
+                for template_id in expected_replacements:
+                    self._delete_template(connection, plan.template_type, template_id)
                 if creator_id is None:
                     creator_id = self._resolve_creator(connection)
                 if creator_id is None:
@@ -1195,3 +1215,27 @@ class OracleTemplateWriter:
             raise
         except Exception as error:
             raise OracleImportError(f"Oracle事务写入失败，事务已回滚：{error}") from error
+
+    @staticmethod
+    def _delete_template(connection: Any, template_type: str, template_id: str) -> None:
+        if template_type == POSITION_TEMPLATE_TYPE:
+            connection.execute(
+                text(
+                    "DELETE FROM TEMP_POSITIONLIMIT_NUMBER WHERE TEMPLATEDETAILID IN "
+                    "(SELECT ID FROM TEMP_POSITIONLIMIT_DETAIL WHERE TEMPLATEID = :template_id)"
+                ),
+                {"template_id": int(template_id)},
+            )
+            connection.execute(
+                text("DELETE FROM TEMP_POSITIONLIMIT_DETAIL WHERE TEMPLATEID = :template_id"),
+                {"template_id": int(template_id)},
+            )
+        else:
+            connection.execute(
+                text("DELETE FROM TEMP_OPENTOTALLIMIT WHERE TEMPLATEID = :template_id"),
+                {"template_id": int(template_id)},
+            )
+        connection.execute(
+            text("DELETE FROM TEMP_RELEASE_RECORD WHERE ID = :template_id"),
+            {"template_id": int(template_id)},
+        )

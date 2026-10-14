@@ -16,6 +16,40 @@ export interface Source {
   latest_run: RunSummary | null;
 }
 
+export interface SourceGroup {
+  id: string;
+  name: string;
+  schedule_enabled: boolean;
+  schedule_interval_minutes: number;
+  next_run_at: string | null;
+  sources: Source[];
+}
+
+export interface RunBatch {
+  id: string;
+  kind: string;
+  status: string;
+  trigger_type: "manual" | "scheduled";
+  auto_import_status: string;
+  auto_import_message: string | null;
+  import_batch_id: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface RunDatabaseImport {
+  batch_id: string;
+  template_type: string;
+  template_name: string;
+  status: string;
+  origin: string;
+  counts: Record<string, number>;
+  target_template_ids: string[];
+  replaced_template_ids: string[];
+  error_message: string | null;
+  issues: { entity_type: string; entity_index: number; field: string; code: string; message: string }[];
+}
+
 export interface RunSummary {
   id: string;
   status: string;
@@ -70,6 +104,10 @@ export interface Run extends RunSummary {
   final_url: string | null;
   profile_key: string;
   baseline_run_id: string | null;
+  run_batch_id: string | null;
+  trigger_type: "manual" | "scheduled";
+  run_batch: RunBatch | null;
+  database_imports: RunDatabaseImport[];
   error_code: string | null;
   error_message: string | null;
   attempt: number;

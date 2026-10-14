@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.app import oracle_import
@@ -53,7 +54,7 @@ def test_write_uses_sequences_for_template_and_detail_ids(monkeypatch):
     class FakeConnection:
         def execute(self, statement, parameters):
             executed.append((str(statement), parameters))
-            return SimpleNamespace()
+            return SimpleNamespace(fetchall=lambda: [])
 
     connection = FakeConnection()
 
@@ -73,12 +74,6 @@ def test_write_uses_sequences_for_template_and_detail_ids(monkeypatch):
         return next(sequence_values)
 
     monkeypatch.setattr(oracle_import.OracleTemplateWriter, "_next_value", staticmethod(fake_next_value))
-    monkeypatch.setattr(
-        oracle_import.OracleTemplateWriter,
-        "_status_conflict",
-        staticmethod(lambda _connection, _template_type: False),
-    )
-
     plan = ImportPlan(
         run_id="run-1",
         view="recognized",
@@ -107,13 +102,68 @@ def test_write_uses_sequences_for_template_and_detail_ids(monkeypatch):
     assert sequence_names == ["TEMP_RELEASE_RECORD_SEQ", "TEMP_OPENTOTALLIMIT_SEQ"]
     assert result.template_id == "9001"
     assert result.open_total_ids == ["9002"]
-    release_sql, release_parameters = executed[0]
-    detail_sql, detail_parameters = executed[1]
+    release_sql, release_parameters = next(item for item in executed if "INSERT INTO TEMP_RELEASE_RECORD" in item[0])
+    detail_sql, detail_parameters = next(item for item in executed if "INSERT INTO TEMP_OPENTOTALLIMIT" in item[0])
     assert "(ID, TEMPLATE_TYPE" in release_sql
     assert "RETURNING" not in release_sql
     assert release_parameters["id"] == 9001
     assert "INSERT INTO TEMP_OPENTOTALLIMIT (ID, TEMPLATEID" in detail_sql
     assert detail_parameters["id"] == 9002
+
+
+def test_replace_template_deletes_children_before_header_and_rolls_back_on_write_error(monkeypatch):
+    executed: list[str] = []
+    rolled_back = False
+
+    class FakeConnection:
+        def execute(self, statement, _parameters=None):
+            sql = str(statement)
+            executed.append(sql)
+            if sql.startswith("SELECT ID FROM TEMP_RELEASE_RECORD"):
+                return SimpleNamespace(fetchall=lambda: [(9100,)])
+            if sql.startswith("INSERT INTO TEMP_RELEASE_RECORD"):
+                raise RuntimeError("header insert failed")
+            return SimpleNamespace(fetchall=lambda: [])
+
+    connection = FakeConnection()
+
+    class FakeTransaction:
+        def __enter__(self):
+            return connection
+
+        def __exit__(self, error_type, _error, _traceback):
+            nonlocal rolled_back
+            rolled_back = error_type is not None
+            return False
+
+    class FakeEngine:
+        def begin(self):
+            return FakeTransaction()
+
+    monkeypatch.setattr(oracle_import.OracleTemplateWriter, "_next_value", staticmethod(lambda *_args: 9200))
+    plan = ImportPlan(
+        run_id="run-1",
+        view="recognized",
+        document_sha256="a" * 64,
+        template_type="TEMP_POSITIONLIMIT_DETAIL",
+        template_name="替换模板",
+        remark="测试",
+        application_version="V260123",
+        position_rows=[],
+        open_total_rows=[],
+        fingerprint="f" * 64,
+        creator_id=42,
+        replace_template_ids=["9100"],
+    )
+
+    with pytest.raises(OracleImportError, match="事务写入失败"):
+        oracle_import.OracleTemplateWriter(Settings(), engine=FakeEngine()).write(plan)
+
+    deletes = [sql for sql in executed if sql.startswith("DELETE FROM")]
+    assert "DELETE FROM TEMP_POSITIONLIMIT_NUMBER" in deletes[0]
+    assert "DELETE FROM TEMP_POSITIONLIMIT_DETAIL" in deletes[1]
+    assert deletes[2] == "DELETE FROM TEMP_RELEASE_RECORD WHERE ID = :template_id"
+    assert rolled_back is True
 
 
 def _persist_successful_run(app) -> tuple[str, str, dict]:

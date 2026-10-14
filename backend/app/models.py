@@ -32,6 +32,36 @@ class Source(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
 
+class SourceGroup(Base):
+    __tablename__ = "source_groups"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    future_source_id: Mapped[str] = mapped_column(ForeignKey("sources.id"), nullable=False, unique=True)
+    option_source_id: Mapped[str] = mapped_column(ForeignKey("sources.id"), nullable=False, unique=True)
+    schedule_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    schedule_interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+
+class RunBatch(Base):
+    __tablename__ = "run_batches"
+    __table_args__ = (Index("ix_run_batches_created", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_group_id: Mapped[str | None] = mapped_column(ForeignKey("source_groups.id"), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    trigger_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="queued")
+    auto_import_status: Mapped[str] = mapped_column(String(40), nullable=False, default="not_started")
+    auto_import_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    import_batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Run(Base):
     __tablename__ = "runs"
     __table_args__ = (
@@ -41,6 +71,7 @@ class Run(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     source_id: Mapped[str] = mapped_column(ForeignKey("sources.id"), nullable=False, index=True)
+    run_batch_id: Mapped[str | None] = mapped_column(ForeignKey("run_batches.id"), nullable=True, index=True)
     requested_url: Mapped[str] = mapped_column(Text, nullable=False)
     normalized_url: Mapped[str] = mapped_column(Text, nullable=False)
     profile_key: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -128,6 +159,8 @@ class DatabaseImportBatch(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False, index=True)
+    run_batch_id: Mapped[str | None] = mapped_column(ForeignKey("run_batches.id"), nullable=True, index=True)
+    origin: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
     revision_id: Mapped[str | None] = mapped_column(ForeignKey("document_revisions.id"), nullable=True)
     view: Mapped[str] = mapped_column(String(20), nullable=False, default="recognized")
     template_type: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -139,10 +172,19 @@ class DatabaseImportBatch(Base):
     counts: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     used_derived_warning: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     target_template_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    replaced_template_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
     committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DatabaseImportBatchRun(Base):
+    __tablename__ = "database_import_batch_runs"
+    __table_args__ = (Index("ix_database_import_batch_runs_run", "run_id"),)
+
+    batch_id: Mapped[str] = mapped_column(ForeignKey("database_import_batches.id"), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), primary_key=True)
 
 
 class DatabaseImportIssue(Base):

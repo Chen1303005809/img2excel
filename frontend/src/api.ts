@@ -1,4 +1,4 @@
-import type { Artifact, CompareResult, DocumentResponse, Run, Source } from "./types";
+import type { Artifact, CompareResult, DocumentResponse, Run, Source, SourceGroup } from "./types";
 import type { ExceptionTradeRow } from "./exceptionTradeModel";
 import type { PositionLimitRow } from "./positionLimitModel";
 
@@ -36,6 +36,9 @@ export interface DatabaseImportResult {
   counts: Record<string, number>;
   used_derived_warning: boolean;
   target_template_ids: string[];
+  replaced_template_ids: string[];
+  origin: string;
+  run_batch_id: string | null;
   error_message: string | null;
   created_at: string;
   updated_at: string;
@@ -74,6 +77,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   sources: () => request<Source[]>("/api/sources"),
+  sourceGroups: () => request<SourceGroup[]>("/api/source-groups"),
+  updateSourceGroup: (id: string, body: Partial<Pick<SourceGroup, "schedule_enabled" | "schedule_interval_minutes">>) =>
+    request<SourceGroup>(`/api/source-groups/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  createSourceGroupRun: (id: string) =>
+    request<{ run_batch_id: string; runs: Run[] }>(`/api/source-groups/${id}/runs`, { method: "POST" }),
   createSource: (body: { url: string; name?: string; schedule_enabled?: boolean; schedule_interval_minutes?: number }) =>
     request<Source>("/api/sources", { method: "POST", body: JSON.stringify(body) }),
   updateSource: (id: string, body: Partial<Pick<Source, "name" | "enabled" | "url" | "schedule_enabled" | "schedule_interval_minutes">>) =>

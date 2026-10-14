@@ -3,7 +3,7 @@ import { api, type DatabaseImportTemplateType, type ExportFormat } from "./api";
 import { EXCEPTION_TRADE_HEADERS, extractExceptionTradeTable, isExceptionMonitoringDocument, type ExceptionTradeRow } from "./exceptionTradeModel";
 import { POSITION_LIMIT_HEADERS, extractPositionLimitTable, isPositionLimitDocument, type PositionLimitRow } from "./positionLimitModel";
 import { buildDiffMap, buildQualityMap, cellDisplay, cellRangeContains, cloneDocument, findEntityDiff, findMergeAt, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, rangesOverlap, scoreLevel, unmergeCellAt, type CellRange, type EntityDiff } from "./tableModel";
-import type { CompareResult, Document, Run, Scalar, Source, TableSection } from "./types";
+import type { CompareResult, Document, Run, Scalar, Source, SourceGroup, TableSection } from "./types";
 
 type View = "sources" | "runs";
 type TablePresentation = "ocr" | "entity";
@@ -47,6 +47,17 @@ function statusText(status: string): string {
     awaiting_image_selection: "待选图片",
     succeeded: "已完成",
     failed: "失败",
+    pending: "待自动导入",
+    waiting_for_runs: "等待同批运行",
+    preflighting: "预校验中",
+    preflight_succeeded: "预校验通过",
+    preflight_failed: "预校验失败",
+    committing: "导入中",
+    committed: "导入成功",
+    rolled_back: "导入回滚",
+    blocked_by_external_template: "被非自动模板阻止",
+    skipped: "未执行导入",
+    not_applicable: "无需自动导入",
   };
   return labels[status] ?? status;
 }
@@ -120,6 +131,7 @@ function documentStats(document: Document | null): DocumentStats {
 function App() {
   const [view, setView] = useState<View>("sources");
   const [sources, setSources] = useState<Source[]>([]);
+  const [sourceGroups, setSourceGroups] = useState<SourceGroup[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [successfulRuns, setSuccessfulRuns] = useState<Run[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -144,6 +156,7 @@ function App() {
   const positionLimitPartnerPrimaryRunId = useRef<string | null>(null);
 
   const refreshSources = useCallback(async () => setSources(await api.sources()), []);
+  const refreshSourceGroups = useCallback(async () => setSourceGroups(await api.sourceGroups()), []);
   const refreshRuns = useCallback(async () => setRuns(await api.runs(sourceFilter || undefined, statusFilter || undefined)), [sourceFilter, statusFilter]);
   const refreshSuccessfulRuns = useCallback(async () => setSuccessfulRuns(await api.runs(undefined, "succeeded")), []);
 
@@ -171,17 +184,25 @@ function App() {
     }
   }, []);
 
-  useEffect(() => {
-    void Promise.all([refreshSources(), refreshRuns(), refreshSuccessfulRuns()]).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
-  }, [refreshRuns, refreshSources, refreshSuccessfulRuns]);
+  const refreshSelectedRun = useCallback(async (runId: string) => {
+    setSelectedRun(await api.run(runId));
+  }, []);
 
   useEffect(() => {
-    if (!selectedRunId || !selectedRun || !activeStatuses.has(selectedRun.status)) return;
+    void Promise.all([refreshSources(), refreshSourceGroups(), refreshRuns(), refreshSuccessfulRuns()]).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
+  }, [refreshRuns, refreshSources, refreshSourceGroups, refreshSuccessfulRuns]);
+
+  useEffect(() => {
+    const importPending = Boolean(selectedRun?.run_batch && ["pending", "waiting_for_runs", "preflighting", "preflight_succeeded", "committing"].includes(selectedRun.run_batch.auto_import_status));
+    if (!selectedRunId || !selectedRun || (!activeStatuses.has(selectedRun.status) && !importPending)) return;
     const timer = window.setInterval(() => {
-      void Promise.all([loadRun(selectedRunId, false), refreshRuns(), refreshSources(), refreshSuccessfulRuns()]).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
+      const selectedRunRefresh = activeStatuses.has(selectedRun.status)
+        ? loadRun(selectedRunId, false)
+        : refreshSelectedRun(selectedRunId);
+      void Promise.all([selectedRunRefresh, refreshRuns(), refreshSources(), refreshSourceGroups(), refreshSuccessfulRuns()]).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
     }, 1500);
     return () => window.clearInterval(timer);
-  }, [loadRun, refreshRuns, refreshSources, refreshSuccessfulRuns, selectedRun, selectedRunId]);
+  }, [loadRun, refreshRuns, refreshSelectedRun, refreshSources, refreshSourceGroups, refreshSuccessfulRuns, selectedRun, selectedRunId]);
 
   async function addSource(event: FormEvent) {
     event.preventDefault();
@@ -210,6 +231,19 @@ function App() {
     }
   }
 
+  async function runSourceGroup(groupId: string) {
+    try {
+      const result = await api.createSourceGroupRun(groupId);
+      const firstRun = result.runs[0];
+      await Promise.all([refreshRuns(), refreshSuccessfulRuns(), refreshSources(), refreshSourceGroups()]);
+      if (firstRun) await loadRun(firstRun.id);
+      setView("runs");
+      setNotice({ kind: "success", text: "期货与期权限仓已作为同一批次加入队列" });
+    } catch (error) {
+      setNotice({ kind: "error", text: (error as Error).message });
+    }
+  }
+
   async function toggleSource(source: Source) {
     try {
       await api.updateSource(source.id, { enabled: !source.enabled });
@@ -224,6 +258,16 @@ function App() {
       await api.updateSource(source.id, patch);
       await refreshSources();
       setNotice({ kind: "success", text: patch.schedule_enabled === false ? "已停用定时抓取" : "定时抓取设置已保存" });
+    } catch (error) {
+      setNotice({ kind: "error", text: (error as Error).message });
+    }
+  }
+
+  async function updateGroupSchedule(group: SourceGroup, patch: Partial<Pick<SourceGroup, "schedule_enabled" | "schedule_interval_minutes">>) {
+    try {
+      await api.updateSourceGroup(group.id, patch);
+      await refreshSourceGroups();
+      setNotice({ kind: "success", text: patch.schedule_enabled === false ? "已停用限仓组定时抓取" : "限仓组定时设置已保存" });
     } catch (error) {
       setNotice({ kind: "error", text: (error as Error).message });
     }
@@ -508,7 +552,7 @@ function App() {
               </section>
               <section className="panel">
                 <div className="panel-heading"><div><p className="eyebrow">SOURCE LIST</p><h2>已添加网址</h2></div><button className="quiet" onClick={() => void refreshSources()}>刷新</button></div>
-              <SourceTable sources={sources} onRun={runSource} onToggle={toggleSource} onSchedule={updateSchedule} />
+              <SourceTable sources={sources} sourceGroups={sourceGroups} onRun={runSource} onToggle={toggleSource} onSchedule={updateSchedule} onGroupRun={runSourceGroup} onGroupSchedule={updateGroupSchedule} />
               </section>
             </>
           ) : (
@@ -527,9 +571,37 @@ function App() {
   );
 }
 
-function SourceTable({ sources, onRun, onToggle, onSchedule }: { sources: Source[]; onRun: (source: Source) => void; onToggle: (source: Source) => void; onSchedule: (source: Source, patch: Partial<Pick<Source, "schedule_enabled" | "schedule_interval_minutes">>) => void }) {
+function SourceTable({ sources, sourceGroups, onRun, onToggle, onSchedule, onGroupRun, onGroupSchedule }: {
+  sources: Source[];
+  sourceGroups: SourceGroup[];
+  onRun: (source: Source) => void;
+  onToggle: (source: Source) => void;
+  onSchedule: (source: Source, patch: Partial<Pick<Source, "schedule_enabled" | "schedule_interval_minutes">>) => void;
+  onGroupRun: (groupId: string) => void;
+  onGroupSchedule: (group: SourceGroup, patch: Partial<Pick<SourceGroup, "schedule_enabled" | "schedule_interval_minutes">>) => void;
+}) {
+  const groupedIds = new Set(sourceGroups.flatMap((group) => group.sources.map((source) => source.id)));
+  const standaloneSources = sources.filter((source) => !groupedIds.has(source.id));
   if (!sources.length) return <div className="empty-state">还没有来源，先添加一个网址。</div>;
-  return <div className="table-scroll"><table className="list-table"><thead><tr><th>名称</th><th>网址</th><th>状态</th><th>定时抓取</th><th>最近运行</th><th /></tr></thead><tbody>{sources.map((source) => <tr key={source.id}><td className="strong">{source.name}</td><td className="url-cell" title={source.url}>{source.url}</td><td><span className={`status-dot ${source.enabled ? "on" : "off"}`}>{source.enabled ? "启用" : "停用"}</span></td><td><ScheduleEditor source={source} onChange={(patch) => onSchedule(source, patch)} /></td><td>{source.latest_run ? <><span className={`status-badge ${source.latest_run.status}`}>{statusText(source.latest_run.status)}</span><small className="table-time">{formatTime(source.latest_run.finished_at || source.latest_run.created_at)}</small></> : "暂无"}</td><td className="actions"><button className="quiet" disabled={!source.enabled} onClick={() => onRun(source)}>立即运行</button><button className="quiet" onClick={() => onToggle(source)}>{source.enabled ? "停用" : "启用"}</button></td></tr>)}</tbody></table></div>;
+  return <div className="table-scroll"><table className="list-table"><thead><tr><th>名称</th><th>网址</th><th>状态</th><th>定时抓取</th><th>最近运行</th><th /></tr></thead><tbody>
+    {sourceGroups.map((group) => {
+      const [future, option] = group.sources;
+      const allEnabled = group.sources.length === 2 && group.sources.every((source) => source.enabled);
+      return <tr key={group.id}>
+        <td className="strong">{group.name}<small className="run-count">期货 + 期权</small></td>
+        <td className="url-cell" title={group.sources.map((source) => source.url).join(" | ")}>{group.sources.map((source) => source.url).join(" · ")}</td>
+        <td><div className="source-group-status">{group.sources.map((source) => <span key={source.id} className={`status-dot ${source.enabled ? "on" : "off"}`}>{source.name.replace("交易所", "")} {source.enabled ? "启用" : "停用"}</span>)}</div></td>
+        <td><GroupScheduleEditor group={group} onChange={(patch) => onGroupSchedule(group, patch)} /></td>
+        <td><div className="source-group-latest">{group.sources.map((source) => <small key={source.id}>{source.name}: {source.latest_run ? `${statusText(source.latest_run.status)} · ${formatTime(source.latest_run.finished_at || source.latest_run.created_at)}` : "暂无"}</small>)}</div></td>
+        <td className="actions source-group-actions">
+          <button className="quiet" disabled={!allEnabled} onClick={() => onGroupRun(group.id)}>立即运行两页</button>
+          {future && <button className="quiet" onClick={() => onToggle(future)}>{future.enabled ? "停用期货" : "启用期货"}</button>}
+          {option && <button className="quiet" onClick={() => onToggle(option)}>{option.enabled ? "停用期权" : "启用期权"}</button>}
+        </td>
+      </tr>;
+    })}
+    {standaloneSources.map((source) => <tr key={source.id}><td className="strong">{source.name}</td><td className="url-cell" title={source.url}>{source.url}</td><td><span className={`status-dot ${source.enabled ? "on" : "off"}`}>{source.enabled ? "启用" : "停用"}</span></td><td><ScheduleEditor source={source} onChange={(patch) => onSchedule(source, patch)} /></td><td>{source.latest_run ? <><span className={`status-badge ${source.latest_run.status}`}>{statusText(source.latest_run.status)}</span><small className="table-time">{formatTime(source.latest_run.finished_at || source.latest_run.created_at)}</small></> : "暂无"}</td><td className="actions"><button className="quiet" disabled={!source.enabled} onClick={() => onRun(source)}>立即运行</button><button className="quiet" onClick={() => onToggle(source)}>{source.enabled ? "停用" : "启用"}</button></td></tr>)}
+  </tbody></table></div>;
 }
 
 function ScheduleEditor({ source, onChange }: { source: Source; onChange: (patch: Partial<Pick<Source, "schedule_enabled" | "schedule_interval_minutes">>) => void }) {
@@ -549,6 +621,23 @@ function ScheduleEditor({ source, onChange }: { source: Source; onChange: (patch
   }
 
   return <div className="schedule-editor"><label><input type="checkbox" checked={source.schedule_enabled} onChange={(event) => onChange({ schedule_enabled: event.target.checked })} /> 自动</label><div className="schedule-interval"><input aria-label={`${source.name} 定时间隔（分钟）`} type="number" min="1" max="43200" value={interval} onChange={(event) => setInterval(event.target.value)} onBlur={saveInterval} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} /><span>分钟</span></div><small>{source.schedule_enabled ? `下次 ${formatTime(source.next_run_at)}` : "未启用"}</small></div>;
+}
+
+function GroupScheduleEditor({ group, onChange }: { group: SourceGroup; onChange: (patch: Partial<Pick<SourceGroup, "schedule_enabled" | "schedule_interval_minutes">>) => void }) {
+  const [interval, setInterval] = useState(String(group.schedule_interval_minutes || 60));
+
+  useEffect(() => setInterval(String(group.schedule_interval_minutes || 60)), [group.schedule_interval_minutes]);
+
+  function saveInterval() {
+    const value = Number.parseInt(interval, 10);
+    if (!Number.isInteger(value) || value < 1 || value > 43_200) {
+      setInterval(String(group.schedule_interval_minutes || 60));
+      return;
+    }
+    if (value !== group.schedule_interval_minutes) onChange({ schedule_interval_minutes: value });
+  }
+
+  return <div className="schedule-editor"><label><input type="checkbox" checked={group.schedule_enabled} onChange={(event) => onChange({ schedule_enabled: event.target.checked })} /> 自动</label><div className="schedule-interval"><input aria-label="期货与期权限仓组定时间隔（分钟）" type="number" min="1" max="43200" value={interval} onChange={(event) => setInterval(event.target.value)} onBlur={saveInterval} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} /><span>分钟</span></div><small>{group.schedule_enabled ? `下次 ${formatTime(group.next_run_at)}` : "未启用"}</small></div>;
 }
 
 interface RunHistoryGroup {
@@ -645,6 +734,7 @@ function RunDetail({ run, document, compare, stats, dirty, databaseImportLoading
   const hasSavedSourceImage = run.candidates.some((candidate) => candidate.selected && candidate.downloaded);
   return <>
     <section className="panel run-card"><div className="run-card-top"><div><p className="eyebrow">RUN DETAIL</p><h2>{run.status === "succeeded" ? (document?.title || "识别结果") : statusText(run.status)}</h2><p className="muted">{formatTime(run.created_at)} · {run.requested_url}</p></div><div className="run-detail-actions">{run.status === "succeeded" && <button type="button" className="quiet" disabled={rerecognizeLoading || !hasSavedSourceImage} title={hasSavedSourceImage ? "从这次运行保存的原图重新识别" : "未找到已保存的原图"} onClick={onRerecognize}>{rerecognizeLoading ? "正在排队…" : "重新识别图片"}</button>}<span className={`status-badge large ${run.status}`}>{statusText(run.status)}</span></div></div><div className="progress-track large"><span style={{ width: `${run.progress}%` }} /></div><div className="run-message">{run.message}{run.error_message && <span className="error-text">：{run.error_message}</span>}</div>{run.status === "succeeded" && <><div className="stat-row"><Stat label="分区" value={stats.sections} /><Stat label="非空单元格" value={stats.cells} /></div><div className="stat-row confidence-stats" aria-label="不同颜色的识别分数数量"><Stat tone="high" label="高分框" value={stats.confidence.high} /><Stat tone="medium" label="中分框" value={stats.confidence.medium} /><Stat tone="low" label="低分框" value={stats.confidence.low} /><Stat tone="unknown" label="未提供" value={stats.confidence.unknown} /></div></>}{run.status === "succeeded" && <SelectedImageInfo run={run} />}</section>
+    {(run.run_batch || run.database_imports.length > 0) && <ImportHistory run={run} />}
     {run.status === "awaiting_image_selection" && <CandidatePicker candidates={run.candidates} onSelect={onSelectImage} />}
     {run.status === "succeeded" && document && <>
       {(!showingEntityPresentation || !supportsEntityPresentation) && <ComparisonPanel compare={compare} />}
@@ -678,6 +768,22 @@ function RunDetail({ run, document, compare, stats, dirty, databaseImportLoading
       <Artifacts run={run} />
     </>}
   </>;
+}
+
+function ImportHistory({ run }: { run: Run }) {
+  const runBatch = run.run_batch;
+  return <section className="panel import-history-panel">
+    <div className="panel-heading"><div><p className="eyebrow">DATABASE IMPORT</p><h2>{run.trigger_type === "scheduled" ? "定时批次导入" : "导入历史"}</h2></div>{runBatch && <span className={`status-badge ${runBatch.auto_import_status}`}>{statusText(runBatch.auto_import_status)}</span>}</div>
+    {runBatch && <p className="muted import-history-message">{runBatch.auto_import_message || (runBatch.trigger_type === "scheduled" ? "等待自动导入处理" : "手动运行不会自动写入数据库")}</p>}
+    {run.database_imports.map((item) => <article className="import-history-item" key={item.batch_id}>
+      <div className="import-history-item-heading"><strong>{item.template_name}</strong><span className={`status-badge ${item.status}`}>{statusText(item.status)}</span></div>
+      <small>{item.origin === "scheduled" ? "定时自动导入" : "人工导入"} · {item.counts.total_rows ?? 0} 条数据 · 批次 {item.batch_id.slice(0, 8)}</small>
+      {item.target_template_ids.length > 0 && <small>目标模板：{item.target_template_ids.join("、")}</small>}
+      {item.replaced_template_ids.length > 0 && <small>已替换自动模板：{item.replaced_template_ids.join("、")}</small>}
+      {item.error_message && <p className="error-text">{item.error_message}</p>}
+      {item.issues.length > 0 && <ul>{item.issues.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul>}
+    </article>)}
+  </section>;
 }
 
 function Stat({ label, value, tone }: { label: string; value: number; tone?: keyof ConfidenceCounts }) { return <div className={`stat ${tone ?? ""}`}><strong>{value}</strong><span>{label}</span></div>; }

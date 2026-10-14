@@ -6,7 +6,7 @@ from uuid import uuid4
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Run, Source, utc_now
+from .models import Run, RunBatch, Source, SourceGroup, utc_now
 
 
 DEFAULT_SCHEDULE_INTERVAL_MINUTES = 60
@@ -42,12 +42,19 @@ def latest_successful_run(session: Session, source_id: str, normalized_url: str 
     return session.scalar(query.order_by(desc(Run.finished_at), desc(Run.created_at)).limit(1))
 
 
-def create_queued_run(session: Session, source: Source, *, now: datetime | None = None) -> Run:
+def create_queued_run(
+    session: Session,
+    source: Source,
+    *,
+    now: datetime | None = None,
+    run_batch_id: str | None = None,
+) -> Run:
     """Create a run using the same locked successful baseline as the API."""
     baseline = latest_successful_run(session, source.id, source.normalized_url)
     run = Run(
         id=str(uuid4()),
         source_id=source.id,
+        run_batch_id=run_batch_id,
         requested_url=source.url,
         normalized_url=source.normalized_url,
         profile_key=source.profile_key,
@@ -62,6 +69,30 @@ def create_queued_run(session: Session, source: Source, *, now: datetime | None 
     return run
 
 
+def create_run_batch(
+    session: Session,
+    *,
+    kind: str,
+    trigger_type: str,
+    source_group_id: str | None = None,
+    now: datetime | None = None,
+) -> RunBatch:
+    batch = RunBatch(
+        id=str(uuid4()),
+        source_group_id=source_group_id,
+        kind=kind,
+        trigger_type=trigger_type,
+        status="queued",
+        auto_import_status="pending" if trigger_type == "scheduled" else "not_applicable",
+        created_at=now or utc_now(),
+    )
+    session.add(batch)
+    # Runs reference this row, so persist the batch before adding dependent
+    # runs. This also makes the helper safe for API-created manual batches.
+    session.flush()
+    return batch
+
+
 class ScheduleManager:
     """Persistently turns due source schedules into ordinary queued runs."""
 
@@ -72,6 +103,37 @@ class ScheduleManager:
         current = now or utc_now()
         created_ids: list[str] = []
         with self.session_factory() as session:
+            position_group = session.get(SourceGroup, "position-limit")
+            grouped_source_ids: set[str] = set()
+            if position_group is not None:
+                grouped_source_ids = {position_group.future_source_id, position_group.option_source_id}
+                if position_group.schedule_enabled and _is_due(position_group.next_run_at, current):
+                    sources = [
+                        session.get(Source, position_group.future_source_id),
+                        session.get(Source, position_group.option_source_id),
+                    ]
+                    sources = [source for source in sources if source is not None]
+                    all_enabled = len(sources) == 2 and all(source.enabled for source in sources)
+                    active_run_id = session.scalar(
+                        select(Run.id)
+                        .where(Run.source_id.in_(grouped_source_ids), Run.status.in_(ACTIVE_RUN_STATUSES))
+                        .order_by(desc(Run.created_at))
+                        .limit(1)
+                    )
+                    if all_enabled and active_run_id is None:
+                        batch = create_run_batch(
+                            session,
+                            kind="position_pair",
+                            trigger_type="scheduled",
+                            source_group_id=position_group.id,
+                            now=current,
+                        )
+                        for source in sources:
+                            run = create_queued_run(session, source, now=current, run_batch_id=batch.id)
+                            created_ids.append(run.id)
+                    position_group.next_run_at = schedule_next_at(current, position_group.schedule_interval_minutes)
+                    position_group.updated_at = current
+
             sources = list(
                 session.scalars(
                     select(Source)
@@ -80,6 +142,8 @@ class ScheduleManager:
                 )
             )
             for source in sources:
+                if source.id in grouped_source_ids:
+                    continue
                 if not _is_due(source.next_run_at, current):
                     continue
 
@@ -90,7 +154,8 @@ class ScheduleManager:
                     .limit(1)
                 )
                 if active_run_id is None:
-                    run = create_queued_run(session, source, now=current)
+                    batch = create_run_batch(session, kind="single_source", trigger_type="scheduled", now=current)
+                    run = create_queued_run(session, source, now=current, run_batch_id=batch.id)
                     created_ids.append(run.id)
 
                 # Advance from the current tick rather than repeatedly

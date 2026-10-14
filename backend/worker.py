@@ -13,9 +13,11 @@ from .app.artifacts import ArtifactStore
 from .app.config import Settings, get_settings
 from .app.crawling import Crawl4AIAdapter
 from .app.database import build_engine, run_migrations
+from .app.import_service import DatabaseImportService
 from .app.models import Base, Run, utc_now
+from .app.oracle_import import OracleTemplateWriter
 from .app.pipeline import PipelineRunner
-from .app.seed import seed_sources
+from .app.seed import seed_source_groups, seed_sources
 from .app.scheduling import ScheduleManager
 
 
@@ -123,10 +125,17 @@ async def run_worker(settings: Settings | None = None) -> None:
     session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     with session_factory() as session:
         seed_sources(session)
+        seed_source_groups(session)
     queue = JobQueue(session_factory, settings)
     queue.recover_stale()
     scheduler = ScheduleManager(session_factory)
     store = ArtifactStore(settings.resolved_data_dir)
+    import_service = DatabaseImportService(
+        session_factory,
+        store,
+        settings,
+        OracleTemplateWriter(settings),
+    )
     crawl_semaphore = asyncio.Semaphore(max(1, settings.effective_crawl_concurrency))
     ocr_semaphore = asyncio.Semaphore(max(1, settings.ocr_concurrency))
 
@@ -138,6 +147,7 @@ async def run_worker(settings: Settings | None = None) -> None:
             crawler,
             ocr_semaphore=ocr_semaphore,
             crawl_semaphore=crawl_semaphore,
+            batch_finalizer=import_service,
         )
         active: dict[str, asyncio.Task[None]] = {}
         leases: dict[str, str] = {}

@@ -35,6 +35,11 @@ class Extractor(Protocol):
         """Extract a validated generic table document from an image."""
 
 
+class BatchFinalizer(Protocol):
+    def on_run_finished(self, run_batch_id: str) -> None:
+        """Finalize aggregate work after one run leaves the worker."""
+
+
 class LocalImageExtractor:
     def __init__(self):
         self._engine = None
@@ -115,6 +120,7 @@ class PipelineRunner:
         exporters: ExporterRegistry | None = None,
         ocr_semaphore: asyncio.Semaphore | None = None,
         crawl_semaphore: asyncio.Semaphore | None = None,
+        batch_finalizer: BatchFinalizer | None = None,
     ):
         self.settings = settings
         self.session_factory = session_factory
@@ -125,6 +131,7 @@ class PipelineRunner:
         self.downloader = ImageDownloader(settings)
         self.ocr_semaphore = ocr_semaphore or asyncio.Semaphore(max(1, settings.ocr_concurrency))
         self.crawl_semaphore = crawl_semaphore or asyncio.Semaphore(max(1, settings.effective_crawl_concurrency))
+        self.batch_finalizer = batch_finalizer
 
     def _update_run(self, run_id: str, **values: Any) -> Run | None:
         with self.session_factory() as session:
@@ -238,6 +245,18 @@ class PipelineRunner:
             self._fail(run_id, "extraction_failed", str(error) or "image extraction failed")
         except Exception as error:
             self._fail(run_id, "pipeline_failed", str(error) or error.__class__.__name__)
+        finally:
+            if self.batch_finalizer is not None:
+                with self.session_factory() as session:
+                    run = session.get(Run, run_id)
+                    run_batch_id = run.run_batch_id if run is not None else None
+                if run_batch_id:
+                    try:
+                        await asyncio.to_thread(self.batch_finalizer.on_run_finished, run_batch_id)
+                    except Exception:
+                        # Import failures are persisted independently and must
+                        # not overwrite a successful recognition run.
+                        pass
 
     async def _crawl(self, run_id: str) -> ImageCandidate | None:
         run = self._update_run(run_id, status="crawling", stage="crawling", progress=5, message="正在抓取网页")

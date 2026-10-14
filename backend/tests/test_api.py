@@ -94,6 +94,22 @@ def test_source_lifecycle_and_seeded_sources(tmp_path):
         assert queued.json()["baseline_run_id"] is None
 
 
+def test_manual_limit_group_run_queues_both_sources_without_auto_import(tmp_path):
+    from backend.app.config import Settings
+
+    settings_data = tmp_path / "data"
+    app = create_app(Settings(data_dir=settings_data, database_url=f"sqlite:///{settings_data / 'app.db'}"))
+    with TestClient(app) as client:
+        group = client.get("/api/source-groups").json()[0]
+        response = client.post(f"/api/source-groups/{group['id']}/runs")
+        assert response.status_code == 201
+        payload = response.json()
+        assert len(payload["runs"]) == 2
+        assert len({run["run_batch_id"] for run in payload["runs"]}) == 1
+        assert all(run["trigger_type"] == "manual" for run in payload["runs"])
+        assert all(run["run_batch"]["auto_import_status"] == "not_applicable" for run in payload["runs"])
+
+
 def test_source_schedule_can_be_configured_with_a_custom_interval(tmp_path):
     from backend.app.config import Settings
 
