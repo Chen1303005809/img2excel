@@ -3,9 +3,9 @@ import { api, type DatabaseImportTemplateType, type ExportFormat } from "./api";
 import { EXCEPTION_TRADE_HEADERS, extractExceptionTradeTable, isExceptionMonitoringDocument, type ExceptionTradeRow } from "./exceptionTradeModel";
 import { POSITION_LIMIT_HEADERS, extractPositionLimitTable, isPositionLimitDocument, type PositionLimitRow } from "./positionLimitModel";
 import { buildDiffMap, buildQualityMap, cellDisplay, cellRangeContains, cloneDocument, findEntityDiff, findMergeAt, formatConfidence, mergeCellRange, mergeMaps, parseCellInput, rangesOverlap, scoreLevel, unmergeCellAt, type CellRange, type EntityDiff } from "./tableModel";
-import type { CompareResult, Document, Run, Scalar, Source, SourceGroup, TableSection } from "./types";
+import type { CompareResult, DatabaseImportHistoryItem, Document, Run, RunBatchHistoryItem, Scalar, Source, SourceGroup, TableSection } from "./types";
 
-type View = "sources" | "runs";
+type View = "sources" | "runs" | "imports" | "scheduled";
 type TablePresentation = "ocr" | "entity";
 type Notice = { kind: "error" | "success"; text: string } | null;
 type ConfidenceCounts = { high: number; medium: number; low: number; unknown: number };
@@ -58,6 +58,10 @@ function statusText(status: string): string {
     blocked_by_external_template: "被非自动模板阻止",
     skipped: "未执行导入",
     not_applicable: "无需自动导入",
+    processing: "处理中",
+    not_started: "尚未开始",
+    manual: "手动导入",
+    scheduled: "定时自动导入",
   };
   return labels[status] ?? status;
 }
@@ -134,6 +138,12 @@ function App() {
   const [sourceGroups, setSourceGroups] = useState<SourceGroup[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [successfulRuns, setSuccessfulRuns] = useState<Run[]>([]);
+  const [databaseImportHistory, setDatabaseImportHistory] = useState<DatabaseImportHistoryItem[]>([]);
+  const [databaseImportHistoryOffset, setDatabaseImportHistoryOffset] = useState<number | null>(null);
+  const [databaseImportHistoryLoading, setDatabaseImportHistoryLoading] = useState(false);
+  const [scheduledHistory, setScheduledHistory] = useState<RunBatchHistoryItem[]>([]);
+  const [scheduledHistoryOffset, setScheduledHistoryOffset] = useState<number | null>(null);
+  const [scheduledHistoryLoading, setScheduledHistoryLoading] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRun, setSelectedRun] = useState<Run | null>(null);
   const [document, setDocument] = useState<Document | null>(null);
@@ -159,6 +169,54 @@ function App() {
   const refreshSourceGroups = useCallback(async () => setSourceGroups(await api.sourceGroups()), []);
   const refreshRuns = useCallback(async () => setRuns(await api.runs(sourceFilter || undefined, statusFilter || undefined)), [sourceFilter, statusFilter]);
   const refreshSuccessfulRuns = useCallback(async () => setSuccessfulRuns(await api.runs(undefined, "succeeded")), []);
+  const refreshDatabaseImportHistory = useCallback(async () => {
+    setDatabaseImportHistoryLoading(true);
+    try {
+      const page = await api.databaseImports();
+      setDatabaseImportHistory(page.items);
+      setDatabaseImportHistoryOffset(page.next_offset);
+    } finally {
+      setDatabaseImportHistoryLoading(false);
+    }
+  }, []);
+  const refreshScheduledHistory = useCallback(async () => {
+    setScheduledHistoryLoading(true);
+    try {
+      const page = await api.runBatches("scheduled");
+      setScheduledHistory(page.items);
+      setScheduledHistoryOffset(page.next_offset);
+    } finally {
+      setScheduledHistoryLoading(false);
+    }
+  }, []);
+
+  async function loadMoreDatabaseImportHistory() {
+    if (databaseImportHistoryOffset === null || databaseImportHistoryLoading) return;
+    setDatabaseImportHistoryLoading(true);
+    try {
+      const page = await api.databaseImports(databaseImportHistoryOffset);
+      setDatabaseImportHistory((current) => [...current, ...page.items]);
+      setDatabaseImportHistoryOffset(page.next_offset);
+    } catch (error) {
+      setNotice({ kind: "error", text: (error as Error).message });
+    } finally {
+      setDatabaseImportHistoryLoading(false);
+    }
+  }
+
+  async function loadMoreScheduledHistory() {
+    if (scheduledHistoryOffset === null || scheduledHistoryLoading) return;
+    setScheduledHistoryLoading(true);
+    try {
+      const page = await api.runBatches("scheduled", scheduledHistoryOffset);
+      setScheduledHistory((current) => [...current, ...page.items]);
+      setScheduledHistoryOffset(page.next_offset);
+    } catch (error) {
+      setNotice({ kind: "error", text: (error as Error).message });
+    } finally {
+      setScheduledHistoryLoading(false);
+    }
+  }
 
   const loadRun = useCallback(async (runId: string, resetPresentation = true) => {
     setSelectedRange(null);
@@ -191,6 +249,15 @@ function App() {
   useEffect(() => {
     void Promise.all([refreshSources(), refreshSourceGroups(), refreshRuns(), refreshSuccessfulRuns()]).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
   }, [refreshRuns, refreshSources, refreshSourceGroups, refreshSuccessfulRuns]);
+
+  useEffect(() => {
+    if (view === "imports") {
+      void refreshDatabaseImportHistory().catch((error: Error) => setNotice({ kind: "error", text: error.message }));
+    }
+    if (view === "scheduled") {
+      void refreshScheduledHistory().catch((error: Error) => setNotice({ kind: "error", text: error.message }));
+    }
+  }, [refreshDatabaseImportHistory, refreshScheduledHistory, view]);
 
   useEffect(() => {
     const importPending = Boolean(selectedRun?.run_batch && ["pending", "waiting_for_runs", "preflighting", "preflight_succeeded", "committing"].includes(selectedRun.run_batch.auto_import_status));
@@ -533,6 +600,8 @@ function App() {
         <nav className="nav-tabs" aria-label="主导航">
           <button className={view === "sources" ? "active" : ""} onClick={() => setView("sources")}>来源管理</button>
           <button className={view === "runs" ? "active" : ""} onClick={() => setView("runs")}>运行历史 <span>{runs.length}</span></button>
+          <button className={view === "imports" ? "active" : ""} onClick={() => setView("imports")}>数据库导入</button>
+          <button className={view === "scheduled" ? "active" : ""} onClick={() => setView("scheduled")}>定时任务</button>
         </nav>
       </header>
 
@@ -543,7 +612,7 @@ function App() {
           {view === "sources" ? (
             <>
               <section className="panel intro-panel">
-                <div><p className="eyebrow">SOURCES</p><h2>页面来源</h2><p>所有来源使用同一个正文图片位置配置。每次运行都会留下独立历史。</p></div>
+                <div><p className="eyebrow">SOURCES</p><h2>页面来源</h2><p>所有来源使用同一个正文图片位置配置。每次运行都会留下独立历史。</p><p className="source-schedule-note">定时任务识别成功后会自动尝试导入支持的业务数据，包括期货与期权限仓配对、开仓总量限制；不支持或校验未通过时，可在“定时任务”历史查看原因。</p></div>
                 <form className="source-form" onSubmit={addSource}>
                   <input required type="url" placeholder="https://example.com/page" value={newUrl} onChange={(event) => setNewUrl(event.target.value)} />
                   <input placeholder="来源名称（可选）" value={newName} onChange={(event) => setNewName(event.target.value)} />
@@ -555,11 +624,15 @@ function App() {
               <SourceTable sources={sources} sourceGroups={sourceGroups} onRun={runSource} onToggle={toggleSource} onSchedule={updateSchedule} onGroupRun={runSourceGroup} onGroupSchedule={updateGroupSchedule} />
               </section>
             </>
-          ) : (
+          ) : view === "runs" ? (
             <section className="panel">
               <div className="panel-heading"><div><p className="eyebrow">RUN HISTORY</p><h2>运行历史</h2></div><div className="panel-actions"><div className="filter-row"><select aria-label="按来源筛选" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}><option value="">全部来源</option>{sources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}</select><select aria-label="按状态筛选" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">全部状态</option><option value="queued">排队中</option><option value="crawling">抓取中</option><option value="awaiting_image_selection">待选图片</option><option value="extracting">识别中</option><option value="exporting">生成文件</option><option value="succeeded">已完成</option><option value="failed">失败</option></select><button className="quiet" onClick={() => void refreshRuns()}>刷新</button></div></div></div>
               <RunTable runs={runs} selectedRunId={selectedRunId} onSelect={(id) => void loadRun(id)} />
             </section>
+          ) : view === "imports" ? (
+            <DatabaseImportHistoryView items={databaseImportHistory} loading={databaseImportHistoryLoading} hasMore={databaseImportHistoryOffset !== null} onRefresh={() => void refreshDatabaseImportHistory().catch((error: Error) => setNotice({ kind: "error", text: error.message }))} onLoadMore={() => void loadMoreDatabaseImportHistory()} onSelectRun={(id) => void loadRun(id)} />
+          ) : (
+            <ScheduledTaskHistoryView items={scheduledHistory} loading={scheduledHistoryLoading} hasMore={scheduledHistoryOffset !== null} onRefresh={() => void refreshScheduledHistory().catch((error: Error) => setNotice({ kind: "error", text: error.message }))} onLoadMore={() => void loadMoreScheduledHistory()} onSelectRun={(id) => void loadRun(id)} />
           )}
         </section>
 
@@ -701,6 +774,68 @@ function RunTable({ runs, selectedRunId, onSelect }: { runs: Run[]; selectedRunI
       </tr>)}
     </Fragment>;
   })}</tbody></table></div>;
+}
+
+function DatabaseImportHistoryView({ items, loading, hasMore, onRefresh, onLoadMore, onSelectRun }: {
+  items: DatabaseImportHistoryItem[];
+  loading: boolean;
+  hasMore: boolean;
+  onRefresh: () => void;
+  onLoadMore: () => void;
+  onSelectRun: (id: string) => void;
+}) {
+  return <section className="panel">
+    <div className="panel-heading"><div><p className="eyebrow">DATABASE IMPORT HISTORY</p><h2>数据库导入历史</h2><p className="muted">记录手动导入和定时任务自动导入的结果。</p></div><button className="quiet" disabled={loading} onClick={onRefresh}>{loading ? "刷新中…" : "刷新"}</button></div>
+    {!items.length ? <div className="empty-state">{loading ? "正在读取导入历史…" : "还没有数据库导入记录。"}</div> : <div className="table-scroll"><table className="list-table database-import-history-table"><thead><tr><th>时间</th><th>来源</th><th>导入内容</th><th>数据量</th><th>结果</th></tr></thead><tbody>{items.map((item) => {
+      const sourceRuns = item.source_runs.length ? item.source_runs : [{ run_id: item.run_id, source_id: "", source_name: "查看运行详情" }];
+      const issueMessage = item.error_message || item.issues[0]?.message;
+      return <tr key={item.batch_id}>
+        <td>{formatTime(item.committed_at || item.created_at)}<small className="table-time">{item.committed_at ? "完成时间" : "创建时间"}</small></td>
+        <td><div className="history-source-links">{sourceRuns.map((source) => <button type="button" className="history-run-link" key={source.run_id} onClick={() => onSelectRun(source.run_id)}>{source.source_name}</button>)}</div></td>
+        <td><strong>{item.template_name}</strong><small className="history-subline">{statusText(item.origin)} · 批次 {item.batch_id.slice(0, 8)}</small></td>
+        <td>{item.counts.total_rows ?? 0} 条</td>
+        <td><span className={`status-badge ${item.status}`}>{statusText(item.status)}</span>{issueMessage && <small className="history-error">{issueMessage}</small>}</td>
+      </tr>;
+    })}</tbody></table></div>}
+    {hasMore && <div className="history-load-more"><button className="quiet" disabled={loading} onClick={onLoadMore}>{loading ? "加载中…" : "加载更多"}</button></div>}
+  </section>;
+}
+
+function recognitionStatus(run: RunBatchHistoryItem["runs"][number]): { label: string; className: string } {
+  if (run.status === "succeeded") {
+    return run.recognition_skipped
+      ? { label: "成功（复用结果）", className: "succeeded" }
+      : { label: "识别成功", className: "succeeded" };
+  }
+  if (run.status === "failed") return { label: "识别失败", className: "failed" };
+  return { label: statusText(run.status), className: run.status };
+}
+
+function ScheduledTaskHistoryView({ items, loading, hasMore, onRefresh, onLoadMore, onSelectRun }: {
+  items: RunBatchHistoryItem[];
+  loading: boolean;
+  hasMore: boolean;
+  onRefresh: () => void;
+  onLoadMore: () => void;
+  onSelectRun: (id: string) => void;
+}) {
+  return <section className="panel">
+    <div className="panel-heading"><div><p className="eyebrow">SCHEDULED TASK HISTORY</p><h2>定时任务历史</h2><p className="muted">按批次查看识别状态和自动导入结果；成组任务分别显示各来源识别情况。</p></div><button className="quiet" disabled={loading} onClick={onRefresh}>{loading ? "刷新中…" : "刷新"}</button></div>
+    {!items.length ? <div className="empty-state">{loading ? "正在读取定时任务历史…" : "还没有定时任务记录。"}</div> : <div className="table-scroll"><table className="list-table scheduled-history-table"><thead><tr><th>运行时间</th><th>来源识别</th><th>自动导入结果</th><th>批次状态</th></tr></thead><tbody>{items.map((batch) => <tr key={batch.id}>
+      <td>{formatTime(batch.created_at)}<small className="table-time">{batch.kind === "position_pair" ? "期货与期权限仓批次" : "单来源批次"}</small></td>
+      <td><div className="scheduled-run-list">{batch.runs.map((run) => {
+        const result = recognitionStatus(run);
+        return <div className="scheduled-run-item" key={run.id}>
+          <button type="button" className="history-run-link" onClick={() => onSelectRun(run.id)}>{run.source_name}</button>
+          <span className={`status-badge ${result.className}`}>{result.label}</span>
+          {run.error_message && <small className="history-error">{run.error_message}</small>}
+        </div>;
+      })}{!batch.runs.length && <span className="muted">没有关联运行记录</span>}</div></td>
+      <td><span className={`status-badge ${batch.auto_import_status}`}>{statusText(batch.auto_import_status)}</span><small className="history-subline">{batch.auto_import_message || "等待自动导入处理"}</small></td>
+      <td><span className={`status-badge ${batch.status}`}>{statusText(batch.status)}</span>{batch.finished_at && <small className="table-time">完成于 {formatTime(batch.finished_at)}</small>}</td>
+    </tr>)}</tbody></table></div>}
+    {hasMore && <div className="history-load-more"><button className="quiet" disabled={loading} onClick={onLoadMore}>{loading ? "加载中…" : "加载更多"}</button></div>}
+  </section>;
 }
 
 function RunDetail({ run, document, compare, stats, dirty, databaseImportLoading, rerecognizeLoading, selectedRange, tablePresentation, positionLimitPartnerRuns, positionLimitPartnerRunId, onPositionLimitPartnerChange, onTablePresentationChange, onSelectImage, onRerecognize, onChangeCell, onSelectCell, onMerge, onUnmerge, onSave, onExport, onDatabaseImport }: {

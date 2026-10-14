@@ -26,6 +26,7 @@ h2 { margin-bottom: 8px; font-size: 19px; letter-spacing: -.025em; }
 .run-detail-actions { display: flex; align-items: center; gap: 8px; }
 .panel-heading { margin-bottom: 16px; }
 .source-form { display: grid; grid-template-columns: minmax(220px, 1fr) 150px auto; gap: 8px; align-items: center; min-width: 470px; }
+.source-schedule-note { max-width: 670px; margin: 12px 0 0; padding: 10px 12px; border: 1px solid #d9e7f7; border-radius: 8px; color: #315d8d; background: #f5f9ff; font-size: 11px; line-height: 1.6; }
 input, textarea { border: 1px solid #d8dee7; border-radius: 7px; outline: none; background: #fcfdfe; color: #1e2b3b; }
 input { width: 100%; padding: 10px 11px; font-size: 12px; }
 input:focus, textarea:focus { border-color: #5b96db; box-shadow: 0 0 0 3px #e9f2ff; }
@@ -36,6 +37,20 @@ input:focus, textarea:focus { border-color: #5b96db; box-shadow: 0 0 0 3px #e9f2
 .list-table th { padding: 10px 8px; border-bottom: 1px solid #dce2e9; color: #7a8796; text-align: left; font-size: 10px; font-weight: 800; letter-spacing: .08em; }
 .list-table td { padding: 13px 8px; border-bottom: 1px solid #eef1f4; vertical-align: middle; }
 .list-table th:nth-child(1) { width: 15%; }.list-table th:nth-child(2) { width: 27%; }.list-table th:nth-child(3) { width: 10%; }.list-table th:nth-child(4) { width: 21%; }.list-table th:nth-child(5) { width: 15%; }.list-table th:nth-child(6) { width: 12%; }
+.database-import-history-table th:nth-child(1) { width: 18%; }.database-import-history-table th:nth-child(2) { width: 24%; }.database-import-history-table th:nth-child(3) { width: 22%; }.database-import-history-table th:nth-child(4) { width: 12%; }.database-import-history-table th:nth-child(5) { width: 24%; }
+.scheduled-history-table th:nth-child(1) { width: 19%; }.scheduled-history-table th:nth-child(2) { width: 39%; }.scheduled-history-table th:nth-child(3) { width: 25%; }.scheduled-history-table th:nth-child(4) { width: 17%; }
+.history-source-links, .scheduled-run-list { display: grid; justify-items: start; gap: 4px; }
+.scheduled-run-item { display: grid; grid-template-columns: minmax(110px, 1fr) auto; align-items: center; gap: 3px 8px; width: 100%; padding: 3px 0; }
+.scheduled-run-item + .scheduled-run-item { border-top: 1px solid #edf0f4; }
+.history-run-link { max-width: 100%; overflow: hidden; padding: 2px 0; border: 0; color: #1d5fa9; background: transparent; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.history-run-link:hover { text-decoration: underline; }
+.history-subline, .history-error { display: block; margin-top: 4px; overflow-wrap: anywhere; color: #748194; font-size: 10px; line-height: 1.45; }
+.history-error { color: #a43d39; }
+.history-load-more { display: flex; justify-content: center; padding-top: 14px; }
+.status-badge.committed, .status-badge.preflight_succeeded { color: #11734b; background: #e6f6ed; }
+.status-badge.preflight_failed, .status-badge.rolled_back, .status-badge.failed { color: #b03a3a; background: #fdeceb; }
+.status-badge.blocked_by_external_template { color: #98671c; background: #fff2cc; }
+.status-badge.pending, .status-badge.waiting_for_runs, .status-badge.preflighting, .status-badge.committing, .status-badge.processing, .status-badge.queued { color: #175ca6; background: #eaf2ff; }
 .list-table tbody tr { transition: background .15s; }.list-table tbody tr:hover, .list-table .selected-row { background: #f7faff; }
 .run-history-table .run-group-row, .run-history-table .run-history-row { cursor: pointer; }.run-history-table .run-history-row { background: #fbfcfe; }.run-history-table .run-history-row td { padding-top: 9px; padding-bottom: 9px; }.run-history-name { padding-left: 18px !important; }.run-history-name small, .run-count { display: block; margin-top: 3px; color: #7b8796; font-size: 10px; font-weight: 400; }.run-count { margin-top: 4px; }.run-history-table .actions button { padding: 6px 8px; font-size: 11px; }
 .source-group-status, .source-group-latest { display: grid; gap: 4px; }.source-group-status .status-dot { width: fit-content; }.source-group-latest small { display: block; color: #6c7888; font-size: 10px; white-space: nowrap; }.source-group-actions { min-width: 190px; }.source-group-actions button { margin: 2px; }

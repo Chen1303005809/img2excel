@@ -1,4 +1,4 @@
-import type { Artifact, CompareResult, DocumentResponse, Run, Source, SourceGroup } from "./types";
+import type { Artifact, CompareResult, DatabaseImportHistoryItem, DocumentResponse, HistoryPage, Run, RunBatchHistoryItem, Source, SourceGroup } from "./types";
 import type { ExceptionTradeRow } from "./exceptionTradeModel";
 import type { PositionLimitRow } from "./positionLimitModel";
 
@@ -93,6 +93,14 @@ export const api = {
     if (sourceId) params.set("source_id", sourceId);
     if (status) params.set("status", status);
     return request<Run[]>(`/api/runs?${params.toString()}`);
+  },
+  databaseImports: (offset = 0, limit = 50) => {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    return request<HistoryPage<DatabaseImportHistoryItem>>(`/api/database-imports?${params.toString()}`);
+  },
+  runBatches: (triggerType: "manual" | "scheduled" = "scheduled", offset = 0, limit = 50) => {
+    const params = new URLSearchParams({ trigger_type: triggerType, limit: String(limit), offset: String(offset) });
+    return request<HistoryPage<RunBatchHistoryItem>>(`/api/run-batches?${params.toString()}`);
   },
   run: (id: string) => request<Run>(`/api/runs/${id}`),
   rerecognize: (id: string) => request<Run>(`/api/runs/${id}/rerecognize`, { method: "POST" }),

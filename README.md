@@ -106,6 +106,7 @@ data/runs/<run_id>/
 - `POST /api/sources/{source_id}/runs`（804/805 来源会成组运行）
 - `GET/PATCH /api/source-groups`、`POST /api/source-groups/{group_id}/runs`
 - `GET /api/runs`、`GET /api/runs/{run_id}`
+- `GET /api/database-imports`、`GET /api/run-batches?trigger_type=scheduled`（历史列表支持 `limit` / `offset` 分页）
 - `POST /api/runs/{run_id}/image-selection`
 - `GET /api/runs/{run_id}/document?view=recognized|revised`
 - `PUT /api/runs/{run_id}/revision`

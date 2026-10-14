@@ -335,6 +335,77 @@ def _database_import_payload(session: Session, batch: DatabaseImportBatch) -> di
     }
 
 
+def _database_import_history_payload(session: Session, batch: DatabaseImportBatch) -> dict[str, Any]:
+    payload = _database_import_payload(session, batch)
+    run_ids = {batch.run_id}
+    run_ids.update(
+        str(item["run_id"])
+        for item in (payload["source_documents"] or [])
+        if isinstance(item, dict) and item.get("run_id")
+    )
+    run_ids.update(
+        session.scalars(
+            select(DatabaseImportBatchRun.run_id).where(DatabaseImportBatchRun.batch_id == batch.id)
+        )
+    )
+    if batch.run_batch_id:
+        run_ids.update(session.scalars(select(Run.id).where(Run.run_batch_id == batch.run_batch_id)))
+
+    runs = list(session.scalars(select(Run).where(Run.id.in_(run_ids)).order_by(Run.source_id, Run.created_at)))
+    sources = {
+        source.id: source.name
+        for source in session.scalars(select(Source).where(Source.id.in_({run.source_id for run in runs})))
+    }
+    payload["source_runs"] = [
+        {
+            "run_id": run.id,
+            "source_id": run.source_id,
+            "source_name": sources.get(run.source_id, run.requested_url),
+        }
+        for run in runs
+    ]
+    return payload
+
+
+def _run_batch_history_payload(session: Session, batch: RunBatch) -> dict[str, Any]:
+    runs = list(
+        session.scalars(
+            select(Run).where(Run.run_batch_id == batch.id).order_by(Run.source_id, Run.created_at)
+        )
+    )
+    sources = {
+        source.id: source.name
+        for source in session.scalars(select(Source).where(Source.id.in_({run.source_id for run in runs})))
+    }
+    return {
+        "id": batch.id,
+        "kind": batch.kind,
+        "status": batch.status,
+        "trigger_type": batch.trigger_type,
+        "auto_import_status": batch.auto_import_status,
+        "auto_import_message": batch.auto_import_message,
+        "import_batch_id": batch.import_batch_id,
+        "created_at": _iso(batch.created_at),
+        "finished_at": _iso(batch.finished_at),
+        "runs": [
+            {
+                "id": run.id,
+                "source_id": run.source_id,
+                "source_name": sources.get(run.source_id, run.requested_url),
+                "status": run.status,
+                "stage": run.stage,
+                "progress": run.progress,
+                "message": run.message,
+                "error_message": run.error_message,
+                "recognition_skipped": run.recognition_skipped,
+                "created_at": _iso(run.created_at),
+                "finished_at": _iso(run.finished_at),
+            }
+            for run in runs
+        ],
+    }
+
+
 def _store_database_import_issues(session: Session, batch_id: str, issues: list[ImportIssue]) -> None:
     session.add_all(
         [
@@ -548,6 +619,45 @@ def build_router(
         if status:
             query = query.where(Run.status == status)
         return [_run_payload(session, run, store) for run in session.scalars(query)]
+
+    @router.get("/database-imports")
+    def list_database_imports(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        session: Session = Depends(db),
+    ) -> dict[str, Any]:
+        batches = list(
+            session.scalars(
+                select(DatabaseImportBatch)
+                .order_by(desc(DatabaseImportBatch.created_at), desc(DatabaseImportBatch.id))
+                .offset(offset)
+                .limit(limit + 1)
+            )
+        )
+        has_more = len(batches) > limit
+        page = batches[:limit]
+        return {
+            "items": [_database_import_history_payload(session, batch) for batch in page],
+            "next_offset": offset + len(page) if has_more else None,
+        }
+
+    @router.get("/run-batches")
+    def list_run_batches(
+        trigger_type: Literal["manual", "scheduled"] | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        session: Session = Depends(db),
+    ) -> dict[str, Any]:
+        query = select(RunBatch).order_by(desc(RunBatch.created_at), desc(RunBatch.id))
+        if trigger_type:
+            query = query.where(RunBatch.trigger_type == trigger_type)
+        batches = list(session.scalars(query.offset(offset).limit(limit + 1)))
+        has_more = len(batches) > limit
+        page = batches[:limit]
+        return {
+            "items": [_run_batch_history_payload(session, batch) for batch in page],
+            "next_offset": offset + len(page) if has_more else None,
+        }
 
     @router.get("/runs/{run_id}")
     def get_run(run_id: str, session: Session = Depends(db)) -> dict[str, Any]:

@@ -50,6 +50,55 @@ export interface RunDatabaseImport {
   issues: { entity_type: string; entity_index: number; field: string; code: string; message: string }[];
 }
 
+export interface HistoryPage<T> {
+  items: T[];
+  next_offset: number | null;
+}
+
+export interface DatabaseImportHistoryItem {
+  batch_id: string;
+  run_id: string;
+  source_runs: { run_id: string; source_id: string; source_name: string }[];
+  template_type: string;
+  template_name: string;
+  status: string;
+  origin: string;
+  counts: Record<string, number>;
+  target_template_ids: string[];
+  replaced_template_ids: string[];
+  error_message: string | null;
+  created_at: string;
+  committed_at: string | null;
+  issues: { entity_type: string; entity_index: number; field: string; code: string; message: string }[];
+}
+
+export interface RunBatchHistoryRun {
+  id: string;
+  source_id: string;
+  source_name: string;
+  status: string;
+  stage: string;
+  progress: number;
+  message: string;
+  error_message: string | null;
+  recognition_skipped: boolean;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface RunBatchHistoryItem {
+  id: string;
+  kind: string;
+  status: string;
+  trigger_type: "manual" | "scheduled";
+  auto_import_status: string;
+  auto_import_message: string | null;
+  import_batch_id: string | null;
+  created_at: string;
+  finished_at: string | null;
+  runs: RunBatchHistoryRun[];
+}
+
 export interface RunSummary {
   id: string;
   status: string;
